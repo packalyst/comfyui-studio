@@ -1,0 +1,26 @@
+# Don't ship local scratch / reference material into the build context.
+.local/
+
+# Don't ship git history to the build machine.
+.git/
+.gitignore
+.github/
+
+# Dependencies are installed inside the image.
+node_modules/
+**/node_modules/
+
+# Build output is regenerated inside the image.
+dist/
+build/
+*.tsbuildinfo
+
+# Editor / OS junk.
+.vscode/
+.idea/
+.DS_Store
+
+# Secrets / logs.
+.env
+.env.*
+*.log

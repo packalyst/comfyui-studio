@@ -1,0 +1,34 @@
+{
+  "hello": "你好",
+  "welcome": "欢迎使用ComfyUI管理器",
+  "comfyui": {
+    "start": {
+      "already_running": "ComfyUI已经在运行中",
+      "started": "ComfyUI已启动",
+      "failed_timeout": "ComfyUI启动失败或超时",
+      "failed": "启动失败: {{message}}"
+    },
+    "stop": {
+      "already_stopped": "ComfyUI已经停止",
+      "stopped": "ComfyUI停止成功",
+      "stopped_force": "ComfyUI停止成功（强制）",
+      "failed": "无法停止ComfyUI",
+      "error": "停止ComfyUI时发生错误"
+    },
+    "restart": {
+      "stop_failed": "停止ComfyUI失败，无法重启",
+      "start_failed": "重启ComfyUI失败：启动阶段出错",
+      "restarted": "ComfyUI重启成功",
+      "error": "重启ComfyUI失败: {{message}}"
+    }
+  },
+  "models": {
+    "download": {
+      "cancel": {
+        "success_task": "已取消任务 {{taskId}}",
+        "success_model": "已取消模型 {{modelName}} 的下载",
+        "error_missing_params": "缺少模型名称或任务ID"
+      }
+    }
+  }
+} 
