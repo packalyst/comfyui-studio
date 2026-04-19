@@ -1,5 +1,5 @@
 // ComfyUI Controller Types
-import packageJson from '../../../../package.json';
+import packageJson from '../../../package.json';
 export interface ComfyUIStatus {
   running: boolean;
   pid: number | null;
