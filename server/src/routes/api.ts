@@ -14,11 +14,14 @@
  */
 
 import { Router, type Request, type Response } from 'express';
+import fs from 'fs';
+import path from 'path';
 import multer from 'multer';
 import * as comfyui from '../services/comfyui.js';
 import * as templates from '../services/templates.js';
 import * as settings from '../services/settings.js';
 import * as catalog from '../services/catalog.js';
+import * as exposedWidgets from '../services/exposedWidgets.js';
 import { trackDownload, stopTracking, getAllDownloads, findByIdentity, isAtCapacity, enqueueDownload, findQueuedByIdentity } from '../services/downloads.js';
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 256 * 1024 * 1024 } });
@@ -212,7 +215,7 @@ function isHiddenWidget(widgetName: string): boolean {
 interface AdvancedSetting {
   id: string;
   label: string;
-  type: 'number' | 'slider' | 'seed' | 'select' | 'toggle';
+  type: 'number' | 'slider' | 'seed' | 'select' | 'toggle' | 'text' | 'textarea';
   value: unknown;
   min?: number;
   max?: number;
@@ -458,21 +461,296 @@ router.get('/workflow-settings/:templateName', async (req: Request, res: Respons
       }
     }
 
-    if (!wrapperNode || !proxyWidgets || proxyWidgets.length === 0) {
-      res.json({ settings: [] });
-      return;
+    // Proxy-widget path: only runs when the template has a wrapper node authored with proxyWidgets.
+    // Raw-widget path (user-picked fields) runs regardless, so templates without a wrapper still
+    // surface whatever the user opted to expose via the "Edit advanced fields" modal.
+    const objectInfo = await getObjectInfo();
+    let settings: AdvancedSetting[] = [];
+    if (wrapperNode && proxyWidgets && proxyWidgets.length > 0) {
+      const labels = resolveProxyLabels(wrapperNode, proxyWidgets, workflow);
+      settings = extractAdvancedSettings(proxyWidgets, widgetValues, objectInfo, labels);
     }
 
-    // 3. Resolve friendly labels by following subgraph wires to real target nodes.
-    const labels = resolveProxyLabels(wrapperNode, proxyWidgets, workflow);
-
-    // 4. Extract settings
-    const objectInfo = await getObjectInfo();
-    const settings = extractAdvancedSettings(proxyWidgets, widgetValues, objectInfo, labels);
+    const userExposed = exposedWidgets.getForTemplate(templateName);
+    if (userExposed.length > 0) {
+      const rawSettings = buildRawWidgetSettings(workflow, userExposed, objectInfo);
+      settings.push(...rawSettings);
+    }
 
     res.json({ settings });
   } catch (err) {
     res.status(500).json({ error: 'Failed to extract workflow settings', detail: String(err) });
+  }
+});
+
+// ---- Raw-node widget enumeration (for the "expose fields" modal) ----
+
+/** Primitive widget types — everything else in objectInfo input specs is a socket connection. */
+const PRIMITIVE_WIDGET_TYPES = new Set(['INT', 'FLOAT', 'STRING', 'BOOLEAN']);
+
+function isWidgetSpec(spec: unknown): boolean {
+  if (!Array.isArray(spec) || spec.length === 0) return false;
+  const t = spec[0];
+  if (Array.isArray(t)) return true;                              // COMBO list
+  if (typeof t === 'string' && PRIMITIVE_WIDGET_TYPES.has(t)) return true;
+  return false;
+}
+
+/** Walk a class_type's inputs in declaration order and return the widget names (in the same order as widgets_values). */
+function widgetNamesFor(objectInfo: Record<string, Record<string, unknown>>, classType: string): string[] {
+  const info = objectInfo[classType] as { input?: { required?: Record<string, unknown>; optional?: Record<string, unknown> } } | undefined;
+  if (!info?.input) return [];
+  const names: string[] = [];
+  for (const [name, spec] of Object.entries(info.input.required || {})) {
+    if (isWidgetSpec(spec)) names.push(name);
+  }
+  for (const [name, spec] of Object.entries(info.input.optional || {})) {
+    if (isWidgetSpec(spec)) names.push(name);
+  }
+  return names;
+}
+
+/** Return min/max/step/options inferred from the objectInfo spec for a given (classType, widgetName). */
+function inferWidgetShape(
+  objectInfo: Record<string, Record<string, unknown>>,
+  classType: string,
+  widgetName: string,
+  value: unknown,
+): Pick<AdvancedSetting, 'type' | 'min' | 'max' | 'step' | 'options'> {
+  const info = objectInfo[classType] as { input?: { required?: Record<string, [unknown, Record<string, unknown>?]>; optional?: Record<string, [unknown, Record<string, unknown>?]> } } | undefined;
+  const spec = info?.input?.required?.[widgetName] ?? info?.input?.optional?.[widgetName];
+  // Sensible defaults from KNOWN_SETTINGS win so we stay consistent with the proxy-widget panel.
+  const known = KNOWN_SETTINGS[widgetName];
+  if (known) return { type: known.type ?? 'number', min: known.min, max: known.max, step: known.step };
+  if (Array.isArray(spec)) {
+    const t = spec[0];
+    const opts = (spec[1] || {}) as { min?: number; max?: number; step?: number };
+    if (Array.isArray(t)) {
+      return { type: 'select', options: t.filter(o => typeof o === 'string').map(o => ({ label: String(o), value: String(o) })) };
+    }
+    if (t === 'INT' || t === 'FLOAT') {
+      return { type: 'number', min: opts.min, max: opts.max, step: opts.step };
+    }
+    if (t === 'BOOLEAN') {
+      return { type: 'toggle' };
+    }
+    if (t === 'STRING') {
+      // `multiline: true` on the spec means ComfyUI expects a textarea (prompts, long strings);
+      // single-line strings (filename_prefix, model names, etc.) get a plain text input.
+      const isMultiline = (opts as { multiline?: boolean }).multiline === true;
+      return { type: isMultiline ? 'textarea' : 'text' };
+    }
+  }
+  if (typeof value === 'boolean') return { type: 'toggle' };
+  if (typeof value === 'number') return { type: 'number' };
+  return { type: 'number' };
+}
+
+/** Hidden-widget filter for the "expose fields" enumeration. Mirrors isHiddenWidget but leaves 'text'/'prompt' visible so users can surface them intentionally. */
+function isEnumerableWidget(widgetName: string): boolean {
+  const lower = widgetName.toLowerCase();
+  // Skip model-file selectors — not useful to expose as a number/slider.
+  if (lower.endsWith('_name') && MODEL_NAME_PATTERNS.some(p => lower.includes(p))) return false;
+  if (MODEL_NAME_PATTERNS.some(p => lower === p)) return false;
+  return true;
+}
+
+/**
+ * Return widgets_values with ComfyUI's frontend-only injected values removed.
+ * Most importantly this strips `control_after_generate`'s value ("randomize"/"fixed"/etc.)
+ * that the UI inserts after any seed widget but which does NOT appear in objectInfo's input list.
+ * Without this filter, every widget after a seed has index N+1 while widgetNamesFor() produces
+ * N entries — so steps/cfg/sampler_name all get the wrong value and numeric fields crash.
+ */
+function filteredWidgetValues(wv: unknown[] | undefined): unknown[] {
+  if (!Array.isArray(wv)) return [];
+  return wv.filter(v => !FRONTEND_ONLY_VALUES.has(v as string));
+}
+
+interface EnumeratedWidget {
+  nodeId: string;
+  nodeType: string;
+  nodeTitle?: string;
+  widgetName: string;
+  label: string;
+  value: unknown;
+  type: AdvancedSetting['type'];
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: { label: string; value: string }[];
+  exposed: boolean;
+}
+
+/**
+ * Return the set of (nodeId|widgetName) tuples that are ALREADY driven by the main form —
+ * so the "Edit advanced fields" modal can skip them. Covers:
+ *   - The positive CLIPTextEncode (and sibling) widgets that `workflowToApiPrompt` writes
+ *     the main Prompt textarea into (first non-negative node with multiline STRING widgets).
+ *   - Any node referenced by a template's formInput `nodeId` binding (image/audio/video uploads).
+ *
+ * Must mirror the node-picking logic in `workflowToApiPrompt` exactly — otherwise the modal
+ * will offer a widget that silently gets clobbered by the main prompt at generate time.
+ */
+function computeFormClaimedWidgets(
+  workflow: Record<string, unknown>,
+  objectInfo: Record<string, Record<string, unknown>>,
+  templateName: string,
+): Set<string> {
+  const claimed = new Set<string>();
+  const nodes = (workflow.nodes || []) as Array<Record<string, unknown>>;
+
+  // 1. Main Prompt binding — first non-negative node with multiline STRING widget(s).
+  for (const node of nodes) {
+    const classType = (node.type as string | undefined) || (node.class_type as string | undefined);
+    if (!classType) continue;
+    const title = (node.title as string | undefined) || '';
+    if (/negative/i.test(title)) continue;
+    const schema = objectInfo[classType] as { input?: { required?: Record<string, unknown>; optional?: Record<string, unknown> } } | undefined;
+    const inputs = { ...(schema?.input?.required || {}), ...(schema?.input?.optional || {}) };
+    const targets: string[] = [];
+    for (const [name, spec] of Object.entries(inputs)) {
+      if (!Array.isArray(spec) || spec[0] !== 'STRING') continue;
+      if ((spec[1] as { multiline?: boolean } | undefined)?.multiline === true) targets.push(name);
+    }
+    if (targets.length === 0) continue;
+    const nodeId = String(node.id);
+    for (const name of targets) claimed.add(`${nodeId}|${name}`);
+    break; // match workflowToApiPrompt: only the first eligible node is claimed
+  }
+
+  // 2. formInputs with explicit node bindings — image/audio/video uploads, etc.
+  const tpl = templates.getTemplate(templateName);
+  for (const fi of (tpl?.formInputs || [])) {
+    const nodeId = (fi as unknown as { nodeId?: number | string }).nodeId;
+    if (nodeId == null) continue;
+    const node = nodes.find(n => String(n.id) === String(nodeId));
+    if (!node) continue;
+    const classType = (node.type as string | undefined) || (node.class_type as string | undefined);
+    if (!classType) continue;
+    // Claim every named widget on that node — LoadImage/LoadAudio/LoadVideo typically have one,
+    // and even if they have multiple (a format combo etc.) we don't want the user to fight the uploader.
+    for (const name of widgetNamesFor(objectInfo, classType)) {
+      claimed.add(`${nodeId}|${name}`);
+    }
+  }
+
+  return claimed;
+}
+
+/** Enumerate raw-node widgets the user could expose. Omits widgets already driven by the main form. */
+async function enumerateTemplateWidgets(workflow: Record<string, unknown>, templateName: string): Promise<EnumeratedWidget[]> {
+  const objectInfo = await getObjectInfo();
+  const saved = exposedWidgets.getForTemplate(templateName);
+  const savedSet = new Set(saved.map(e => `${e.nodeId}|${e.widgetName}`));
+  const formClaimed = computeFormClaimedWidgets(workflow, objectInfo, templateName);
+
+  const out: EnumeratedWidget[] = [];
+  const nodes = (workflow.nodes || []) as Array<Record<string, unknown>>;
+  for (const node of nodes) {
+    const classType = (node.type as string | undefined) || (node.class_type as string | undefined);
+    if (!classType) continue;
+    // Skip wrapper nodes — their widgets are already covered by the proxy-widget pipeline.
+    const props = node.properties as Record<string, unknown> | undefined;
+    if (props?.proxyWidgets) continue;
+
+    const wv = filteredWidgetValues(node.widgets_values as unknown[] | undefined);
+    if (wv.length === 0) continue;
+
+    const names = widgetNamesFor(objectInfo, classType);
+    const nodeId = String(node.id);
+    const title = (node.title as string | undefined) || undefined;
+
+    for (let i = 0; i < wv.length && i < names.length; i++) {
+      const widgetName = names[i];
+      if (!isEnumerableWidget(widgetName)) continue;
+      if (formClaimed.has(`${nodeId}|${widgetName}`)) continue; // hidden — already in main form
+      const value = wv[i];
+      const shape = inferWidgetShape(objectInfo, classType, widgetName, value);
+      out.push({
+        nodeId,
+        nodeType: classType,
+        nodeTitle: title,
+        widgetName,
+        label: titleCase(widgetName),
+        value,
+        type: shape.type ?? 'number',
+        min: shape.min,
+        max: shape.max,
+        step: shape.step,
+        options: shape.options,
+        exposed: savedSet.has(`${nodeId}|${widgetName}`),
+      });
+    }
+  }
+  return out;
+}
+
+/** Build AdvancedSetting entries for user-exposed raw-node widgets (feeds the same panel as proxy-widget settings). */
+function buildRawWidgetSettings(
+  workflow: Record<string, unknown>,
+  exposed: Array<{ nodeId: string; widgetName: string }>,
+  objectInfo: Record<string, Record<string, unknown>>,
+): AdvancedSetting[] {
+  const result: AdvancedSetting[] = [];
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const n of (workflow.nodes || []) as Array<Record<string, unknown>>) {
+    byId.set(String(n.id), n);
+  }
+  for (const e of exposed) {
+    const node = byId.get(e.nodeId);
+    if (!node) continue;
+    const classType = (node.type as string | undefined) || (node.class_type as string | undefined);
+    if (!classType) continue;
+    const names = widgetNamesFor(objectInfo, classType);
+    const idx = names.indexOf(e.widgetName);
+    if (idx < 0) continue;
+    const wv = filteredWidgetValues(node.widgets_values as unknown[] | undefined);
+    if (idx >= wv.length) continue;
+    const value = wv[idx];
+    const shape = inferWidgetShape(objectInfo, classType, e.widgetName, value);
+    const title = (node.title as string | undefined) || classType;
+    result.push({
+      id: `node:${e.nodeId}:${e.widgetName}`,
+      label: `${titleCase(e.widgetName)} (${title})`,
+      type: shape.type ?? 'number',
+      value,
+      min: shape.min,
+      max: shape.max,
+      step: shape.step,
+      options: shape.options,
+      proxyIndex: -1, // marker: not a proxy entry; /generate routes these via nodeOverrides
+    });
+  }
+  return result;
+}
+
+// List every editable widget in a template's workflow, each tagged with whether it's currently exposed.
+router.get('/template-widgets/:templateName', async (req: Request, res: Response) => {
+  try {
+    const templateName = req.params.templateName as string;
+    const wfRes = await fetch(`${COMFYUI_URL}/templates/${encodeURIComponent(templateName)}.json`);
+    if (!wfRes.ok) {
+      res.status(404).json({ error: 'Workflow not found' });
+      return;
+    }
+    const workflow = await wfRes.json();
+    const widgets = await enumerateTemplateWidgets(workflow, templateName);
+    res.json({ widgets });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to enumerate template widgets', detail: String(err) });
+  }
+});
+
+// Save the user's selection of which widgets should appear in Advanced Settings for this template.
+router.put('/template-widgets/:templateName', (req: Request, res: Response) => {
+  try {
+    const templateName = req.params.templateName as string;
+    const body = req.body as { exposed?: Array<{ nodeId: string; widgetName: string }> };
+    const saved = exposedWidgets.setForTemplate(templateName, body.exposed || []);
+    res.json({ exposed: saved });
+  } catch (err) {
+    res.status(400).json({ error: 'Failed to save exposed widgets', detail: String(err) });
   }
 });
 
@@ -1072,14 +1350,34 @@ async function workflowToApiPrompt(
   //    BEFORE the prompt was built — skipped here since we build above. We fall through to the
   //    encoder-widget path which is the only remaining in-prompt destination.
   //  - For any real node whose schema has a `text` or `prompt` widget: write the user prompt in.
+  // Inject the user's prompt into exactly ONE node. Strategy:
+  //   1. Walk nodes in workflow-iteration order, skipping anything titled "negative".
+  //   2. For the first remaining node, find every required/optional input whose objectInfo
+  //      spec is ["STRING", { multiline: true }] — those are prompt-shaped widgets.
+  //   3. Write the user prompt into every such widget on that one node, then stop.
+  //
+  // This covers the whole encoder family: CLIPTextEncode (single `text`), CLIPTextEncodeFlux
+  // (both `clip_l` and `t5xxl` on one node), CLIPTextEncodeSDXL (`text_g` + `text_l`),
+  // TextEncodeAceStepAudio, etc. Single-line STRING inputs like `filename_prefix` are ignored
+  // because they aren't marked multiline.
   const promptText = userInputs.prompt;
   if (promptText != null && promptText !== '') {
     for (const [id, nodeData] of Object.entries(prompt)) {
       const node = nodes.get(id);
       if (!node) continue;
-      const required = (objectInfo[node.type] as { input?: { required?: Record<string, unknown[]> } } | undefined)?.input?.required || {};
-      if ('text' in required) nodeData.inputs['text'] = promptText;
-      else if ('prompt' in required) nodeData.inputs['prompt'] = promptText;
+      const title = (node.title || '') as string;
+      if (/negative/i.test(title)) continue;
+      const schema = objectInfo[node.type] as { input?: { required?: Record<string, unknown>; optional?: Record<string, unknown> } } | undefined;
+      const inputs = { ...(schema?.input?.required || {}), ...(schema?.input?.optional || {}) };
+      const targets: string[] = [];
+      for (const [name, spec] of Object.entries(inputs)) {
+        if (!Array.isArray(spec) || spec[0] !== 'STRING') continue;
+        const opts = spec[1] as { multiline?: boolean } | undefined;
+        if (opts?.multiline === true) targets.push(name);
+      }
+      if (targets.length === 0) continue;
+      for (const name of targets) nodeData.inputs[name] = promptText;
+      break;
     }
   }
 
@@ -1110,17 +1408,39 @@ router.post('/generate', async (req: Request, res: Response) => {
     }
     const workflow = await wfRes.json();
 
-    // 2. Apply advanced settings overrides to the wrapper node's widgets_values
+    // 2a. Split advancedSettings into proxy-widget overrides and raw-node overrides.
+    //     Proxy entries mutate the wrapper node's widgets_values (existing path).
+    //     Raw entries (id = "node:<nodeId>:<widgetName>") are applied post-conversion
+    //     directly onto the API prompt so generation sees the user's values.
+    const proxyEntries: Array<{ proxyIndex: number; value: unknown }> = [];
+    const nodeOverrides: Record<string, Record<string, unknown>> = {};
     if (advancedSettings && typeof advancedSettings === 'object') {
+      for (const [id, val] of Object.entries(advancedSettings as Record<string, { proxyIndex: number; value: unknown }>)) {
+        if (!val || typeof val !== 'object') continue;
+        if (typeof val.proxyIndex === 'number' && val.proxyIndex >= 0) {
+          proxyEntries.push(val);
+          continue;
+        }
+        if (id.startsWith('node:')) {
+          const parts = id.split(':');
+          if (parts.length < 3) continue;
+          const nodeId = parts[1];
+          const widgetName = parts.slice(2).join(':');
+          if (!nodeOverrides[nodeId]) nodeOverrides[nodeId] = {};
+          nodeOverrides[nodeId][widgetName] = val.value;
+        }
+      }
+    }
+
+    // 2b. Apply proxy-widget overrides to the wrapper node's widgets_values.
+    if (proxyEntries.length > 0) {
       const topNodes = (workflow.nodes || []) as Array<Record<string, unknown>>;
       for (const node of topNodes) {
         const props = node.properties as Record<string, unknown> | undefined;
         if (props?.proxyWidgets && Array.isArray(props.proxyWidgets)) {
           const wv = (node.widgets_values || []) as unknown[];
-          for (const [key, val] of Object.entries(advancedSettings as Record<string, { proxyIndex: number; value: unknown }>)) {
-            if (val && typeof val === 'object' && 'proxyIndex' in val && val.proxyIndex < wv.length) {
-              wv[val.proxyIndex] = val.value;
-            }
+          for (const val of proxyEntries) {
+            if (val.proxyIndex < wv.length) wv[val.proxyIndex] = val.value;
           }
           node.widgets_values = wv;
           break;
@@ -1132,6 +1452,16 @@ router.post('/generate', async (req: Request, res: Response) => {
     //    own formInputs bindings so each user value lands on the node the template declared.
     const template = templates.getTemplate(templateName);
     const apiPrompt = await workflowToApiPrompt(workflow, userInputs || {}, template?.formInputs || []);
+
+    // 3b. Apply raw-node overrides onto the API prompt. User-chosen values win over the
+    //     auto-randomized seed from workflowToApiPrompt when they target a seed widget.
+    for (const [nodeId, overrides] of Object.entries(nodeOverrides)) {
+      const entry = apiPrompt[nodeId] as { inputs?: Record<string, unknown> } | undefined;
+      if (!entry?.inputs) continue;
+      for (const [widgetName, value] of Object.entries(overrides)) {
+        entry.inputs[widgetName] = value;
+      }
+    }
 
     // 4. Submit to ComfyUI — attach Comfy Org API key only for API-node workflows
     const attachApiKey = template?.openSource === false;
@@ -1162,23 +1492,26 @@ router.get('/history', async (_req: Request, res: Response) => {
   }
 });
 
-// Get outputs for a specific prompt
+// Get outputs for a specific prompt. Uses the same filename-extension-based media detection
+// as getGalleryItems so SaveVideo (mp4 under `images` key) and SaveAudio (under `audio` key)
+// are recognized correctly rather than lumped as images.
 router.get('/history/:promptId', async (req: Request, res: Response) => {
   try {
-    const data = await comfyui.fetchComfyUI<Record<string, { outputs?: Record<string, { images?: Array<{ filename: string; subfolder: string; type: string }>; videos?: Array<{ filename: string; subfolder: string; type: string }> }> }>>(`/api/history/${req.params.promptId}`);
+    const data = await comfyui.fetchComfyUI<Record<string, { outputs?: Record<string, Record<string, unknown>> }>>(`/api/history/${req.params.promptId}`);
     const entry = data[req.params.promptId as string];
     if (!entry?.outputs) {
       res.json({ outputs: [] });
       return;
     }
-    // Flatten all output images/videos
     const outputs: Array<{ filename: string; subfolder: string; type: string; mediaType: string }> = [];
     for (const nodeOutput of Object.values(entry.outputs)) {
-      for (const img of nodeOutput.images || []) {
-        outputs.push({ ...img, mediaType: 'image' });
-      }
-      for (const vid of nodeOutput.videos || []) {
-        outputs.push({ ...vid, mediaType: 'video' });
+      for (const f of comfyui.collectNodeOutputFiles(nodeOutput)) {
+        outputs.push({
+          filename: f.filename,
+          subfolder: f.subfolder || '',
+          type: f.type || 'output',
+          mediaType: comfyui.detectMediaType(f.filename),
+        });
       }
     }
     res.json({ outputs });
@@ -1707,16 +2040,41 @@ router.post('/check-dependencies', async (req: Request, res: Response) => {
     const required: RequiredModelInfo[] = [];
     const missing: RequiredModelInfo[] = [];
 
+    // Same filesystem-fallback logic as catalog.getMergedModels — if the launcher catalog
+    // doesn't list a file we downloaded (e.g. upserted from a template URL and saved by the
+    // launcher's download-custom, which doesn't always register back into launcher's own
+    // catalog), stat the expected disk path and treat a present file as installed.
+    const modelsDir = process.env.MODELS_DIR || '';
+    const statInstalled = (dir: string | undefined, filename: string): number | null => {
+      if (!modelsDir || !dir) return null;
+      // Category-only save_path ("checkpoints") OR full-path save_path ("checkpoints/foo.safetensors").
+      const candidates = [path.join(modelsDir, dir, filename), path.join(modelsDir, dir)];
+      for (const p of candidates) {
+        try {
+          const st = fs.statSync(p);
+          if (st.isFile()) return st.size;
+        } catch { /* keep trying */ }
+      }
+      return null;
+    };
+
     for (const filename of requiredFilenames) {
       const cat = catalog.getModel(filename);
       const scanEntry = installedModels.find(m => m.filename === filename || m.name === filename);
-      const isInstalled = installedSet.has(filename);
+      const directory = templateDirByFilename.get(filename) || cat?.save_path || scanEntry?.type || '';
+
+      let isInstalled = installedSet.has(filename);
+      let diskSize: number | null = null;
+      if (!isInstalled) {
+        diskSize = statInstalled(directory, filename);
+        if (diskSize !== null) isInstalled = true;
+      }
+
       const entry: RequiredModelInfo = {
         name: filename,
         url: cat?.url || '',
-        // Template's own directory takes precedence over any cached save_path.
-        directory: templateDirByFilename.get(filename) || cat?.save_path || scanEntry?.type || '',
-        size: cat?.size_bytes || scanEntry?.fileSize || undefined,
+        directory,
+        size: cat?.size_bytes || scanEntry?.fileSize || diskSize || undefined,
         size_pretty: cat?.size_pretty || undefined,
         installed: isInstalled,
         gated: cat?.gated,

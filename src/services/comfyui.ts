@@ -8,6 +8,7 @@ import type {
   CatalogModel,
   DependencyCheck,
   AdvancedSetting,
+  EnumeratedWidget,
 } from '../types';
 
 const BASE = '/api';
@@ -61,6 +62,15 @@ export const api = {
 
   getWorkflowSettings: (templateName: string) =>
     fetchJson<{ settings: AdvancedSetting[] }>(`/workflow-settings/${encodeURIComponent(templateName)}`),
+
+  getTemplateWidgets: (templateName: string) =>
+    fetchJson<{ widgets: EnumeratedWidget[] }>(`/template-widgets/${encodeURIComponent(templateName)}`),
+
+  saveExposedWidgets: (templateName: string, exposed: Array<{ nodeId: string; widgetName: string }>) =>
+    fetchJson<{ exposed: Array<{ nodeId: string; widgetName: string }> }>(`/template-widgets/${encodeURIComponent(templateName)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ exposed }),
+    }),
 
   getQueue: () => fetchJson<QueueStatus>('/queue'),
 

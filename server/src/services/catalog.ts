@@ -172,41 +172,53 @@ export async function refreshSize(filename: string, opts: { force?: boolean } = 
   if (!opts.force && !isSizeStale(model) && !model.gated) return model;
   if (!model.url) return model;
 
-  const headers: Record<string, string> = {};
-  const hfToken = getHfToken();
-  if (hfToken && /huggingface\.co/.test(model.url)) {
-    headers['Authorization'] = `Bearer ${hfToken}`;
+  // ComfyUI's external-model-list ships the same filename under multiple mirrors (canonical
+  // + community re-uploads). Pick up every URL we know about for this filename so we can
+  // fall back if the primary 404s (mirror rot is common).
+  const allUrls: string[] = [model.url];
+  for (const m of load().models) {
+    if (m.filename === filename && m.url && !allUrls.includes(m.url)) {
+      allUrls.push(m.url);
+    }
   }
 
-  try {
-    const res = await fetch(model.url, { method: 'HEAD', headers, redirect: 'follow' });
-    if (res.status === 401 || res.status === 403) {
-      const gatedMsg = detectGated(res) || 'This model requires HuggingFace authentication.';
-      model.gated = true;
-      model.gated_message = gatedMsg;
+  for (const url of allUrls) {
+    const headers: Record<string, string> = {};
+    const hfToken = getHfToken();
+    if (hfToken && /huggingface\.co/.test(url)) headers['Authorization'] = `Bearer ${hfToken}`;
+    try {
+      const res = await fetch(url, { method: 'HEAD', headers, redirect: 'follow' });
+      if (res.status === 401 || res.status === 403) {
+        const gatedMsg = detectGated(res) || 'This model requires HuggingFace authentication.';
+        model.gated = true;
+        model.gated_message = gatedMsg;
+        model.url = url; // record which URL is gated so download uses the same one
+        persistCurrent();
+        return model;
+      }
+      if (!res.ok) continue; // 404 / 5xx — try next mirror
+      if (model.gated) {
+        model.gated = undefined;
+        model.gated_message = undefined;
+      }
+      const linked = res.headers.get('x-linked-size');
+      const contentLength = res.headers.get('content-length');
+      const bytes = linked ? Number(linked) : contentLength ? Number(contentLength) : NaN;
+      if (Number.isFinite(bytes) && bytes > 0) {
+        model.size_bytes = bytes;
+        model.size_pretty = formatBytes(bytes);
+        model.size_fetched_at = new Date().toISOString();
+      }
+      model.url = url; // promote the working URL so downloads use it too
       persistCurrent();
       return model;
+    } catch {
+      // transient — keep trying remaining mirrors
+      continue;
     }
-    // 401/403 cleared — reset gated flag if we had one.
-    if (model.gated) {
-      model.gated = undefined;
-      model.gated_message = undefined;
-    }
-    // HF sometimes exposes the real file size via x-linked-size on redirect.
-    const linked = res.headers.get('x-linked-size');
-    const contentLength = res.headers.get('content-length');
-    const bytes = linked ? Number(linked) : contentLength ? Number(contentLength) : NaN;
-    if (res.ok && Number.isFinite(bytes) && bytes > 0) {
-      model.size_bytes = bytes;
-      model.size_pretty = formatBytes(bytes);
-      model.size_fetched_at = new Date().toISOString();
-    }
-    persistCurrent();
-    return model;
-  } catch {
-    // transient — leave state, caller can retry
-    return model;
   }
+  // All URLs exhausted without success. Leave state for caller to retry later.
+  return model;
 }
 
 function persistCurrent(): void {
@@ -242,11 +254,37 @@ export async function getMergedModels(): Promise<MergedModel[]> {
   const merged: MergedModel[] = [];
   const seenFilenames = new Set<string>();
 
+  // MODELS_DIR env is the root of ComfyUI's model tree inside the pod (e.g. /root/ComfyUI/models).
+  // When the launcher's own catalog doesn't know about a model we DO know about (e.g. added via
+  // template download), stat the expected disk path directly so the UI doesn't report
+  // false "not installed" for files that clearly exist.
+  const modelsDir = process.env.MODELS_DIR || '';
+
   for (const model of load().models) {
     seenFilenames.add(model.filename);
     const disk = scanByFilename.get(model.filename);
-    const installed = !!disk?.installed;
-    const fileSize = disk?.fileSize;
+    let installed = !!disk?.installed;
+    let fileSize = disk?.fileSize;
+
+    if (!installed && modelsDir && model.save_path) {
+      // save_path can be either "checkpoints" (category only) or "checkpoints/foo.safetensors"
+      // (from launcher's scan-derived path). Stat both forms.
+      const candidates = [
+        path.join(modelsDir, model.save_path, model.filename),
+        path.join(modelsDir, model.save_path),
+      ];
+      for (const p of candidates) {
+        try {
+          const st = fs.statSync(p);
+          if (st.isFile()) {
+            installed = true;
+            fileSize = st.size;
+            break;
+          }
+        } catch { /* missing, try next */ }
+      }
+    }
+
     merged.push({ ...model, installed, fileSize, fileStatus: deriveFileStatus(model.size_bytes, fileSize, installed) });
   }
 

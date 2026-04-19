@@ -82,31 +82,58 @@ export interface GalleryItem {
   promptId: string;
 }
 
+/**
+ * ComfyUI's history schema is inconsistent about where media lands:
+ *   - SaveImage   → nodeOutput.images = [{filename: "foo.png", ...}]
+ *   - SaveVideo   → nodeOutput.images = [{filename: "foo.mp4", ...}] with `animated: true`  (not under .videos!)
+ *   - SaveAudio   → nodeOutput.audio  = [{filename: "foo.mp3", ...}]  (entirely separate key)
+ *   - Some older nodes might use .videos directly.
+ *
+ * The safest approach is to walk every array-valued key, ignore markers like `animated`,
+ * and infer mediaType from the file extension.
+ */
+const VIDEO_EXTS = new Set(['mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v']);
+const AUDIO_EXTS = new Set(['wav', 'mp3', 'ogg', 'flac', 'm4a', 'opus', 'aac']);
+
+export function detectMediaType(filename: string): 'image' | 'video' | 'audio' {
+  const ext = filename.slice(filename.lastIndexOf('.') + 1).toLowerCase();
+  if (VIDEO_EXTS.has(ext)) return 'video';
+  if (AUDIO_EXTS.has(ext)) return 'audio';
+  return 'image';
+}
+
+interface OutputFile { filename: string; subfolder?: string; type?: string }
+
+/** Collect every file-shaped entry from one node's output bag, regardless of which key holds it. */
+export function collectNodeOutputFiles(nodeOutput: Record<string, unknown>): OutputFile[] {
+  const files: OutputFile[] = [];
+  for (const value of Object.values(nodeOutput)) {
+    if (!Array.isArray(value)) continue;
+    for (const item of value) {
+      if (item && typeof item === 'object' && typeof (item as OutputFile).filename === 'string') {
+        files.push(item as OutputFile);
+      }
+    }
+  }
+  return files;
+}
+
 export async function getGalleryItems(): Promise<GalleryItem[]> {
-  const history = await fetchComfyUI<Record<string, { outputs?: Record<string, { images?: Array<Record<string, string>>; videos?: Array<Record<string, string>> }> }>>('/api/history?max_items=100');
+  const history = await fetchComfyUI<Record<string, { outputs?: Record<string, Record<string, unknown>> }>>('/api/history?max_items=100');
   const items: GalleryItem[] = [];
   for (const [promptId, entry] of Object.entries(history)) {
     if (!entry.outputs) continue;
     for (const nodeOutput of Object.values(entry.outputs)) {
-      for (const img of nodeOutput.images || []) {
+      for (const f of collectNodeOutputFiles(nodeOutput)) {
+        const subfolder = f.subfolder || '';
+        const type = f.type || 'output';
         items.push({
-          id: `${promptId}-${img.filename}`,
-          filename: img.filename,
-          subfolder: img.subfolder || '',
-          type: img.type || 'output',
-          mediaType: 'image',
-          url: `/api/view?filename=${encodeURIComponent(img.filename)}&subfolder=${encodeURIComponent(img.subfolder || '')}&type=${encodeURIComponent(img.type || 'output')}`,
-          promptId,
-        });
-      }
-      for (const vid of nodeOutput.videos || []) {
-        items.push({
-          id: `${promptId}-${vid.filename}`,
-          filename: vid.filename,
-          subfolder: vid.subfolder || '',
-          type: vid.type || 'output',
-          mediaType: 'video',
-          url: `/api/view?filename=${encodeURIComponent(vid.filename)}&subfolder=${encodeURIComponent(vid.subfolder || '')}&type=${encodeURIComponent(vid.type || 'output')}`,
+          id: `${promptId}-${f.filename}`,
+          filename: f.filename,
+          subfolder,
+          type,
+          mediaType: detectMediaType(f.filename),
+          url: `/api/view?filename=${encodeURIComponent(f.filename)}&subfolder=${encodeURIComponent(subfolder)}&type=${encodeURIComponent(type)}`,
           promptId,
         });
       }

@@ -11,8 +11,10 @@ import AdvancedSettings from '../components/AdvancedSettings';
 import ModelDropdown from '../components/ModelDropdown';
 import JsonEditor from '../components/JsonEditor';
 import DependencyModal from '../components/DependencyModal';
+import ExposeWidgetsModal from '../components/ExposeWidgetsModal';
 import { api } from '../services/comfyui';
 import type { StudioCategory, Template, DependencyCheck, AdvancedSetting } from '../types';
+import { Settings2 } from 'lucide-react';
 
 const categories: { id: StudioCategory; label: string; icon: React.ElementType }[] = [
   { id: 'image', label: 'IMAGE', icon: ImageIcon },
@@ -58,7 +60,32 @@ export default function Studio() {
 
   const initialCategory = (searchParams.get('category') as StudioCategory) || null;
 
-  const [activeCategory, setActiveCategory] = useState<StudioCategory>(initialCategory || 'image');
+  // Per-category memory of the last template the user was on. Persisted in localStorage
+  // so it survives reloads; only honored when the user arrives at Studio without a specific
+  // template URL (arriving from Explore with /studio/:templateName wins instead).
+  const LAST_TEMPLATE_STORAGE_KEY = 'studio:lastTemplateByCategory';
+  const LAST_CATEGORY_STORAGE_KEY = 'studio:lastCategory';
+  const [lastTemplateByCategory, setLastTemplateByCategory] = useState<Partial<Record<StudioCategory, string>>>(() => {
+    try {
+      const raw = localStorage.getItem(LAST_TEMPLATE_STORAGE_KEY);
+      return raw ? (JSON.parse(raw) as Partial<Record<StudioCategory, string>>) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  // Initial category resolution order: `?category=xxx` URL param > localStorage > 'image'.
+  // If the URL also has a templateName, a later effect will realign activeCategory to that
+  // template's actual category once templates have loaded.
+  const resolveInitialCategory = (): StudioCategory => {
+    if (initialCategory) return initialCategory;
+    try {
+      const saved = localStorage.getItem(LAST_CATEGORY_STORAGE_KEY) as StudioCategory | null;
+      if (saved && ['image','video','audio','3d','tools','api'].includes(saved)) return saved;
+    } catch { /* localStorage unavailable */ }
+    return 'image';
+  };
+  const [activeCategory, setActiveCategory] = useState<StudioCategory>(resolveInitialCategory);
   const [selectedTemplate, setSelectedTemplate] = useState<string>(templateName || '');
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
   const [mode, setMode] = useState<'form' | 'json'>('form');
@@ -74,6 +101,10 @@ export default function Studio() {
   const [advancedSettingsDefs, setAdvancedSettingsDefs] = useState<AdvancedSetting[]>([]);
   const [advancedValues, setAdvancedValues] = useState<Record<string, { proxyIndex: number; value: unknown }>>({});
 
+  // "Expose fields" modal state
+  const [showExposeModal, setShowExposeModal] = useState(false);
+  const [hasEditableWidgets, setHasEditableWidgets] = useState(false);
+
   // Filter templates by active category
   const categoryTemplates = useMemo(() => {
     return templates.filter(t => getCategoryForTemplate(t) === activeCategory);
@@ -85,26 +116,50 @@ export default function Studio() {
     [templates, selectedTemplate]
   );
 
-  // Fetch advanced settings when template changes
+  // Fetch advanced settings when template changes. We also probe `/template-widgets`
+  // to decide whether the "Edit advanced fields" button should be shown — only if there
+  // actually are editable widgets in the template's workflow.
+  const refreshAdvancedSettings = useCallback((name: string) => {
+    return api.getWorkflowSettings(name).then(result => {
+      setAdvancedSettingsDefs(result.settings);
+    }).catch(() => {
+      setAdvancedSettingsDefs([]);
+    });
+  }, []);
+
   useEffect(() => {
     if (!selectedTemplate) {
       setAdvancedSettingsDefs([]);
       setAdvancedValues({});
+      setHasEditableWidgets(false);
       return;
     }
     let cancelled = false;
+    setAdvancedValues({});
     api.getWorkflowSettings(selectedTemplate)
       .then(result => {
-        if (!cancelled) {
-          setAdvancedSettingsDefs(result.settings);
-          setAdvancedValues({});
+        if (!cancelled) setAdvancedSettingsDefs(result.settings);
+      })
+      .catch(() => {
+        if (!cancelled) setAdvancedSettingsDefs([]);
+      });
+    api.getTemplateWidgets(selectedTemplate)
+      .then(result => {
+        if (cancelled) return;
+        setHasEditableWidgets(result.widgets.length > 0);
+        // Pre-fill the main Prompt textarea with the positive CLIPTextEncode's default text.
+        // Heuristic: take the first CLIPTextEncode `text` widget whose node title doesn't mention "negative".
+        const positive = result.widgets.find(w =>
+          w.nodeType === 'CLIPTextEncode' &&
+          w.widgetName === 'text' &&
+          !/negative/i.test(w.nodeTitle || '')
+        );
+        if (positive && typeof positive.value === 'string' && positive.value.length > 0) {
+          setFormValues(prev => (prev.prompt ? prev : { ...prev, prompt: positive.value }));
         }
       })
       .catch(() => {
-        if (!cancelled) {
-          setAdvancedSettingsDefs([]);
-          setAdvancedValues({});
-        }
+        if (!cancelled) setHasEditableWidgets(false);
       });
     return () => { cancelled = true; };
   }, [selectedTemplate]);
@@ -165,14 +220,47 @@ export default function Studio() {
     }
   }, [template?.name]);
 
-  // When category changes, auto-select first template if current one doesn't match
+  // When category changes, prefer the user's last template for that category; fall back to
+  // the first template in the list. Skipped when the current template already belongs to the
+  // active category (e.g. user just landed from Explore with a specific templateName URL).
   useEffect(() => {
     if (template && getCategoryForTemplate(template) === activeCategory) return;
-    if (categoryTemplates.length > 0 && !categoryTemplates.find(t => t.name === selectedTemplate)) {
-      setSelectedTemplate(categoryTemplates[0].name);
-      navigate(`/studio/${categoryTemplates[0].name}`, { replace: true });
+    if (categoryTemplates.length === 0) return;
+    const remembered = lastTemplateByCategory[activeCategory];
+    const rememberedTemplate = remembered && categoryTemplates.find(t => t.name === remembered);
+    const target = rememberedTemplate ? rememberedTemplate.name : categoryTemplates[0].name;
+    if (target !== selectedTemplate) {
+      setSelectedTemplate(target);
+      navigate(`/studio/${target}`, { replace: true });
     }
   }, [activeCategory, categoryTemplates]);
+
+  // Whenever a template is selected, remember it as the last-used one for its category.
+  // Also remember the category itself so a bare `/studio` URL can restore the last tab.
+  useEffect(() => {
+    if (!template) return;
+    const cat = getCategoryForTemplate(template);
+    if (lastTemplateByCategory[cat] !== template.name) {
+      const next = { ...lastTemplateByCategory, [cat]: template.name };
+      setLastTemplateByCategory(next);
+      try { localStorage.setItem(LAST_TEMPLATE_STORAGE_KEY, JSON.stringify(next)); } catch { /* quota / private mode */ }
+    }
+    try { localStorage.setItem(LAST_CATEGORY_STORAGE_KEY, cat); } catch { /* ignore */ }
+  }, [template?.name]);
+
+  // If the URL landed us on a template that belongs to a different category than the one we
+  // restored from localStorage, realign activeCategory so the tabs show the correct one.
+  // Runs once templates are loaded and the selected template is resolvable.
+  useEffect(() => {
+    if (!template) return;
+    const cat = getCategoryForTemplate(template);
+    if (cat !== activeCategory) setActiveCategory(cat);
+  }, [template?.name]);
+
+  // Persist category on user-initiated changes too (tab clicks before any template resolves).
+  useEffect(() => {
+    try { localStorage.setItem(LAST_CATEGORY_STORAGE_KEY, activeCategory); } catch { /* ignore */ }
+  }, [activeCategory]);
 
   const handleSelectTemplate = useCallback((name: string) => {
     setSelectedTemplate(name);
@@ -248,10 +336,24 @@ export default function Studio() {
   }, [template, formValues]);
 
   const canCompare = !!inputImagePreview && !!outputImage && currentJob?.status === 'completed';
-  const outputMediaType = template?.mediaType || 'image';
+  // The template's mediaType describes its THUMBNAIL (almost always "image" even for video/audio templates).
+  // The job's outputMediaType is derived from the generated filename's extension and is the real
+  // source of truth — fall back to the template only if the job hasn't told us yet.
+  const outputMediaType = currentJob?.outputMediaType || template?.mediaType || 'image';
 
   return (
     <div className="flex h-[calc(100vh-3.5rem)]">
+      {/* Expose-widgets modal — opens when the user clicks "Edit advanced fields". */}
+      {showExposeModal && selectedTemplate && (
+        <ExposeWidgetsModal
+          templateName={selectedTemplate}
+          onClose={() => setShowExposeModal(false)}
+          onSaved={() => {
+            // Re-pull advanced settings so the panel reflects the new selection right away.
+            if (selectedTemplate) refreshAdvancedSettings(selectedTemplate);
+          }}
+        />
+      )}
       {/* Dependency Modal */}
       {showDepModal && depCheck && depCheck.missing.length > 0 && (
         <DependencyModal
@@ -389,6 +491,16 @@ export default function Studio() {
                           onChange={setAdvancedValues}
                         />
                       </div>
+                    )}
+                    {hasEditableWidgets && (
+                      <button
+                        type="button"
+                        onClick={() => setShowExposeModal(true)}
+                        className="mt-3 flex items-center gap-1.5 text-[11px] text-gray-400 hover:text-gray-700 transition-colors"
+                      >
+                        <Settings2 className="w-3.5 h-3.5" />
+                        Edit advanced fields
+                      </button>
                     )}
                   </>
                 ) : (

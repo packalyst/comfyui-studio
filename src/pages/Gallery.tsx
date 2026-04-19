@@ -294,6 +294,12 @@ export default function Gallery() {
                 const item = filteredGallery.find(i => i.id === viewItem);
                 if (!item?.url) return <ImageIcon className="w-16 h-16 text-slate-300" />;
                 if (item.mediaType === 'video') return <video src={item.url} controls className="max-h-[60vh] w-full" />;
+                if (item.mediaType === 'audio') return (
+                  <div className="w-full p-8 flex flex-col items-center justify-center gap-4">
+                    <Music className="w-16 h-16 text-slate-300" />
+                    <audio src={item.url} controls className="w-full max-w-md" />
+                  </div>
+                );
                 return <img src={item.url} alt={item.filename} className="max-h-[60vh] w-full object-contain" />;
               })()}
             </div>

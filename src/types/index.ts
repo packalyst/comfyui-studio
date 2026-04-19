@@ -261,11 +261,28 @@ export interface DependencyCheck {
 export interface AdvancedSetting {
   id: string;
   label: string;
-  type: 'number' | 'slider' | 'seed' | 'select' | 'toggle';
+  type: 'number' | 'slider' | 'seed' | 'select' | 'toggle' | 'text' | 'textarea';
   value: unknown;
   min?: number;
   max?: number;
   step?: number;
   options?: { label: string; value: string }[];
+  // `proxyIndex >= 0` = wrapper-node proxy widget (legacy path).
+  // `proxyIndex === -1` = user-exposed raw-node widget, keyed by `id` of the form "node:<nodeId>:<widgetName>".
   proxyIndex: number;
+}
+
+export interface EnumeratedWidget {
+  nodeId: string;
+  nodeType: string;
+  nodeTitle?: string;
+  widgetName: string;
+  label: string;
+  value: unknown;
+  type: 'number' | 'slider' | 'seed' | 'select' | 'toggle' | 'text' | 'textarea';
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: { label: string; value: string }[];
+  exposed: boolean;
 }

@@ -116,13 +116,17 @@ function SettingControl({
 }) {
   switch (setting.type) {
     case 'number': {
-      const step = setting.step ?? 1;
+      const step = setting.step && setting.step > 0 ? setting.step : 1;
       const raw = (value as number | undefined) ?? setting.min ?? 0;
-      const num = typeof raw === 'number' ? raw : Number(raw) || 0;
+      const num = typeof raw === 'number' && Number.isFinite(raw) ? raw : Number(raw) || 0;
       const clamp = (n: number) => {
+        if (!Number.isFinite(n)) n = setting.min ?? 0;
         if (setting.min !== undefined) n = Math.max(setting.min, n);
         if (setting.max !== undefined) n = Math.min(setting.max, n);
-        const precision = Math.max(0, -Math.floor(Math.log10(step)));
+        // Guard: Math.log10 of a non-positive number is NaN; clamp precision to 0 in that case
+        // so toFixed() doesn't throw and blow up the whole Advanced Settings render.
+        const rawPrec = -Math.floor(Math.log10(step));
+        const precision = Number.isFinite(rawPrec) ? Math.max(0, rawPrec) : 0;
         return parseFloat(n.toFixed(precision));
       };
       const atMin = setting.min !== undefined && num <= setting.min;
@@ -207,6 +211,28 @@ function SettingControl({
             ))}
           </SelectContent>
         </Select>
+      );
+
+    case 'text':
+      return (
+        <div className="field-wrap">
+          <input
+            type="text"
+            value={(value as string) ?? ''}
+            onChange={e => onChange(e.target.value)}
+            className="field-input"
+          />
+        </div>
+      );
+
+    case 'textarea':
+      return (
+        <textarea
+          value={(value as string) ?? ''}
+          onChange={e => onChange(e.target.value)}
+          rows={4}
+          className="field-textarea"
+        />
       );
 
     default:
