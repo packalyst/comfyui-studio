@@ -116,13 +116,17 @@ export class ModelInstallManager {
             // 检查文件完整性
             const fileInfo = await this.checkFileBasicIntegrity(fullPath, file, stat.size);
             
-            // 使用文件名作为键，文件信息作为值
+            // Key by the relative path, not the basename. Multiple files (e.g. the
+            // 17+ HuggingFace ControlNets that all ship as `diffusion_pytorch_model.safetensors`)
+            // used to collide at the same key and only the last one scanned survived.
+            // Path-keying keeps every physical file distinct.
             const storePath =
               rootForRelative !== null
                 ? path.relative(rootForRelative, fullPath)
                 : fullPath;
-            result.set(file, {
+            result.set(storePath, {
               path: storePath,
+              filename: file,
               size: stat.size,
               status: fileInfo.status,
               type: this.inferModelTypeFromPath(storePath)
@@ -240,88 +244,97 @@ export class ModelInstallManager {
   // 刷新模型列表的安装状态并检查完整性
   async refreshInstalledStatus(models: ModelInfo[]): Promise<ModelInfo[]> {
     try {
-      // 扫描已安装的模型
+      // installedModels is now keyed by relative path (not basename). Build two indices:
+      //  - byPath     : exact lookup by "<save_path>/<filename>"
+      //  - byFilename : list of scan entries that share a basename, used as a fallback
+      //                 for catalog entries whose save_path doesn't match any disk path.
       const installedModels = await this.scanInstalledModels();
-      
-      // 跟踪已处理的模型文件，避免重复添加
-      const processedFiles = new Set<string>();
-      
+      const byFilename = new Map<string, any[]>();
+      for (const [pathKey, info] of installedModels.entries()) {
+        const base = path.basename(pathKey);
+        if (!byFilename.has(base)) byFilename.set(base, []);
+        byFilename.get(base)!.push({ pathKey, info });
+      }
+
+      // A given disk path can only be "claimed" by ONE catalog entry, so multiple catalog
+      // aliases for the same filename don't all report as installed simultaneously.
+      const claimedPaths = new Set<string>();
+
       // 更新每个模型的安装状态和文件状态
       const updatedModels = await Promise.all(models.map(async model => {
-        // 检查模型文件名是否在已安装列表中
-        if (model.filename && installedModels.has(model.filename)) {
-          processedFiles.add(model.filename); // 标记此文件已处理
-          const fileInfo = installedModels.get(model.filename);
+        // Try exact match: save_path + filename joined.
+        let matchedPath: string | undefined;
+        let matchedInfo: any | undefined;
+
+        if (model.filename && model.save_path) {
+          const candidate = path.posix.join(model.save_path, model.filename);
+          if (installedModels.has(candidate) && !claimedPaths.has(candidate)) {
+            matchedPath = candidate;
+            matchedInfo = installedModels.get(candidate);
+          }
+        }
+
+        // Fallback: first unclaimed disk entry with matching basename.
+        if (!matchedInfo && model.filename) {
+          const candidates = byFilename.get(model.filename) || [];
+          const unclaimed = candidates.find(c => !claimedPaths.has(c.pathKey));
+          if (unclaimed) {
+            matchedPath = unclaimed.pathKey;
+            matchedInfo = unclaimed.info;
+          }
+        }
+
+        // Last-ditch: name substring match (legacy behaviour).
+        if (!matchedInfo && model.name) {
+          for (const [pathKey, info] of installedModels.entries()) {
+            if (claimedPaths.has(pathKey)) continue;
+            if (pathKey.includes(model.name)) { matchedPath = pathKey; matchedInfo = info; break; }
+          }
+        }
+
+        if (matchedInfo && matchedPath) {
+          claimedPaths.add(matchedPath);
           model.installed = true;
-          model.fileStatus = fileInfo.status;
-          model.fileSize = fileInfo.size;
-          model.save_path = fileInfo.path;
-          
-          // 如果模型有预期大小，检查是否匹配
+          model.filename = matchedInfo.filename || path.basename(matchedPath);
+          model.fileStatus = matchedInfo.status;
+          model.fileSize = matchedInfo.size;
+          model.save_path = matchedInfo.path;
+
           if (model.size) {
             const expectedSize = this.parseSizeString(model.size);
-            if (expectedSize && Math.abs(fileInfo.size - expectedSize) / expectedSize > 0.1) {
+            if (expectedSize && Math.abs(matchedInfo.size - expectedSize) / expectedSize > 0.1) {
               model.fileStatus = 'incomplete';
               const logLang = i18nLogger.getLocale();
-              i18nLogger.warn('model.install.size_mismatch', { filename: model.filename, expected: model.size, actual: this.formatFileSize(fileInfo.size), lng: logLang });
+              i18nLogger.warn('model.install.size_mismatch', { filename: model.filename, expected: model.size, actual: this.formatFileSize(matchedInfo.size), lng: logLang });
             }
           }
         } else {
-          // 也检查模型名称是否匹配
-          const possibleMatches = Array.from(installedModels.keys()).filter(
-            filename => filename.includes(model.name) || (model.name && filename.includes(model.name))
-          );
-          
-          if (possibleMatches.length > 0) {
-            processedFiles.add(possibleMatches[0]); // 标记此文件已处理
-            const fileInfo = installedModels.get(possibleMatches[0]);
-            model.installed = true;
-            model.filename = possibleMatches[0];
-            model.fileStatus = fileInfo.status;
-            model.fileSize = fileInfo.size;
-            model.save_path = fileInfo.path;
-            
-            // 与预期大小比较
-            if (model.size) {
-              const expectedSize = this.parseSizeString(model.size);
-              if (expectedSize && Math.abs(fileInfo.size - expectedSize) / expectedSize > 0.1) {
-                model.fileStatus = 'incomplete';
-                const logLang = i18nLogger.getLocale();
-              i18nLogger.warn('model.install.size_mismatch', { filename: model.filename, expected: model.size, actual: this.formatFileSize(fileInfo.size), lng: logLang });
-              }
-            }
-          } else {
-            model.installed = false;
-            model.fileStatus = undefined;
-          }
+          model.installed = false;
+          model.fileStatus = undefined;
         }
-        
+
         return model;
       }));
-      
-      // 添加已安装但未在列表中的模型文件
+
+      // Files on disk not consumed by any catalog entry → "unknown" models.
       const unknownModels: ModelInfo[] = [];
-      
-      for (const [filename, fileInfo] of installedModels.entries()) {
-        if (!processedFiles.has(filename)) {
-          const logLang = i18nLogger.getLocale();
-          i18nLogger.info('model.install.unknown_model_found', { filename, path: fileInfo.path, lng: logLang });
-          
-          // 创建新的模型信息对象
-          const newModel: ModelInfo = {
-            name: filename, // 使用文件名作为模型名
-            type: fileInfo.type || this.inferModelTypeFromPath(fileInfo.path),
-            base_url: '',
-            save_path: fileInfo.path,
-            description: 'Locally discovered model, not in official list',
-            filename: filename,
-            installed: true,
-            fileStatus: 'unknown', // 特殊状态表示"未知模型,无法确认完整性"
-            fileSize: fileInfo.size
-          };
-          
-          unknownModels.push(newModel);
-        }
+      for (const [pathKey, fileInfo] of installedModels.entries()) {
+        if (claimedPaths.has(pathKey)) continue;
+        const logLang = i18nLogger.getLocale();
+        i18nLogger.info('model.install.unknown_model_found', { filename: fileInfo.filename || path.basename(pathKey), path: pathKey, lng: logLang });
+
+        const newModel: ModelInfo = {
+          name: fileInfo.filename || path.basename(pathKey),
+          type: fileInfo.type || this.inferModelTypeFromPath(pathKey),
+          base_url: '',
+          save_path: pathKey,
+          description: 'Locally discovered model, not in official list',
+          filename: fileInfo.filename || path.basename(pathKey),
+          installed: true,
+          fileStatus: 'unknown',
+          fileSize: fileInfo.size
+        };
+        unknownModels.push(newModel);
       }
       
       // 如果有未知模型，添加到结果列表中

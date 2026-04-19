@@ -16,7 +16,7 @@ ARG BASE_IMAGE=docker.io/beclab/comfyui:v0.18.2-fe1.43.4-launcher0.2.36
 FROM ${BASE_IMAGE} AS frontend-build
 WORKDIR /build/studio
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --include=dev
 COPY tsconfig.json vite.config.ts tailwind.config.js postcss.config.js index.html ./
 COPY src ./src
 RUN npm run build
@@ -100,7 +100,7 @@ COPY launcher-backend/src ./src
 # --- Studio frontend source + full deps (needed for vite dev + vite build) ---
 WORKDIR /studio
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --include=dev
 COPY tsconfig.json vite.config.ts tailwind.config.js postcss.config.js index.html ./
 COPY src ./src
 # COPY public ./public   # uncomment if/when a public/ folder is added
