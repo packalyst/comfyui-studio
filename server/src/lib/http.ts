@@ -14,6 +14,38 @@ export function getHfAuthHeaders(
   return { Authorization: `Bearer ${token}` };
 }
 
+/**
+ * Authorization headers to send alongside civitai.com-hosted download/HEAD
+ * requests. Returns an empty object for non-civitai URLs or when no token is
+ * configured. CivitAI accepts `Bearer <token>` on its REST endpoints and
+ * passes the redirect through unchanged.
+ */
+export function getCivitaiAuthHeaders(
+  url: string,
+  token: string | undefined,
+): Record<string, string> {
+  if (!token) return {};
+  let host = '';
+  try { host = new URL(url).hostname.toLowerCase(); } catch { return {}; }
+  if (host !== 'civitai.com' && host !== 'www.civitai.com') return {};
+  return { Authorization: `Bearer ${token}` };
+}
+
+/**
+ * Host-aware auth header resolver used by the unified `download-custom`
+ * endpoint. Picks the correct token based on the URL's host family and
+ * silently returns an empty object for unsupported hosts so callers get a
+ * clean anonymous request.
+ */
+export function getHostAuthHeaders(
+  url: string,
+  tokens: { hfToken?: string; civitaiToken?: string },
+): Record<string, string> {
+  const hf = getHfAuthHeaders(url, tokens.hfToken);
+  if (Object.keys(hf).length > 0) return hf;
+  return getCivitaiAuthHeaders(url, tokens.civitaiToken);
+}
+
 export interface FetchWithRetryOptions {
   attempts?: number;
   /** Initial delay ms, doubled after each failure up to maxDelayMs. */

@@ -10,10 +10,8 @@ import * as settings from '../services/settings.js';
 const router = Router();
 
 // ---- Comfy Org API key (stored server-side, never returned to client) ----
-router.get('/settings/api-key', (_req: Request, res: Response) => {
-  res.json({ configured: settings.isApiKeyConfigured() });
-});
-
+// Status (`configured` flag) is exposed via `GET /api/system` — there's no
+// separate GET here. Only writes remain.
 router.put('/settings/api-key', (req: Request, res: Response) => {
   const { apiKey } = req.body as { apiKey?: unknown };
   if (typeof apiKey !== 'string' || apiKey.trim().length === 0) {
@@ -30,10 +28,7 @@ router.delete('/settings/api-key', (_req: Request, res: Response) => {
 });
 
 // ---- HuggingFace token (for gated models + private HEAD/GET requests) ----
-router.get('/settings/hf-token', (_req: Request, res: Response) => {
-  res.json({ configured: settings.isHfTokenConfigured() });
-});
-
+// Status flag is carried on `GET /api/system`. Only writes remain.
 router.put('/settings/hf-token', (req: Request, res: Response) => {
   const { token } = req.body as { token?: unknown };
   if (typeof token !== 'string' || token.trim().length === 0) {
@@ -46,6 +41,23 @@ router.put('/settings/hf-token', (req: Request, res: Response) => {
 
 router.delete('/settings/hf-token', (_req: Request, res: Response) => {
   settings.clearHfToken();
+  res.json({ configured: false });
+});
+
+// ---- CivitAI token (for authenticated civitai.com downloads + private content) ----
+// Status flag is carried on `GET /api/system`. Only writes remain.
+router.put('/settings/civitai-token', (req: Request, res: Response) => {
+  const { token } = req.body as { token?: unknown };
+  if (typeof token !== 'string' || token.trim().length === 0) {
+    res.status(400).json({ error: 'token must be a non-empty string' });
+    return;
+  }
+  settings.setCivitaiToken(token.trim());
+  res.json({ configured: true });
+});
+
+router.delete('/settings/civitai-token', (_req: Request, res: Response) => {
+  settings.clearCivitaiToken();
   res.json({ configured: false });
 });
 

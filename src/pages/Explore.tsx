@@ -1,12 +1,23 @@
-import { useMemo, useEffect } from 'react';
+import { useMemo, useEffect, useCallback, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Layers, WifiOff, Settings, SlidersHorizontal, X } from 'lucide-react';
+import { Search, Layers, WifiOff, Settings, SlidersHorizontal, X, RefreshCw } from 'lucide-react';
+import type { Template } from '../types';
+import { api } from '../services/comfyui';
 import { useApp } from '../context/AppContext';
 import { usePersistedState } from '../hooks/usePersistedState';
+import { usePaginated } from '../hooks/usePaginated';
+import Pagination from '../components/Pagination';
 import TemplateCard from '../components/TemplateCard';
 import PageSubbar from '../components/PageSubbar';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Checkbox } from '../components/ui/checkbox';
+
+type ReadyFilter = 'all' | 'yes' | 'no';
+
+interface RefreshBannerState {
+  kind: 'success' | 'error';
+  message: string;
+}
 
 const categories = ['All', 'Use Cases', 'Image', 'Video', 'Audio', '3D Model', 'LLM', 'Utility', 'Getting Started'];
 
@@ -22,8 +33,54 @@ export default function Explore() {
   const [activeTags, setActiveTags] = usePersistedState<string[]>('explore.tags', []);
   const [filtersOpen, setFiltersOpen] = usePersistedState('explore.filtersOpen', false);
   const [sourceFilter, setSourceFilter] = usePersistedState<'all' | 'open' | 'api'>('explore.source', 'all');
+  const [readyFilter, setReadyFilter] = usePersistedState<ReadyFilter>('explore.ready', 'all');
 
-  // Extract unique tags from actual templates, sorted by frequency
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshBanner, setRefreshBanner] = useState<RefreshBannerState | null>(null);
+
+  // Server-paginated fetch. Filters are forwarded so pagination aligns.
+  const fetcher = useCallback(
+    async ({ page, pageSize }: { page: number; pageSize: number }) => {
+      const res = await api.getTemplatesPaged(page, pageSize, {
+        q: searchQuery.trim() || undefined,
+        category: activeCategory,
+        tags: activeTags.length > 0 ? activeTags : undefined,
+        source: sourceFilter,
+        ready: readyFilter,
+      });
+      return { items: res.items, total: res.total, hasMore: res.hasMore };
+    },
+    [searchQuery, activeCategory, activeTags, sourceFilter, readyFilter],
+  );
+  const paged = usePaginated<Template>(fetcher, {
+    deps: [searchQuery, activeCategory, activeTags, sourceFilter, readyFilter],
+  });
+  const { items: filteredTemplates, refetch } = paged;
+
+  const handleRefresh = useCallback(async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    setRefreshBanner(null);
+    try {
+      const result = await api.refreshTemplates();
+      setRefreshBanner({
+        kind: 'success',
+        message: `Added ${result.added}, updated ${result.updated}, removed ${result.removed}.`,
+      });
+      await refetch();
+    } catch (err) {
+      setRefreshBanner({
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'Refresh failed',
+      });
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refreshing, refetch]);
+
+  // Tag options + category counts still derive from the bootstrap templates
+  // cached in AppContext (the full list was loaded once for the workflow
+  // dropdowns). Keeps the sidebar stable across pages.
   const tagOptions = useMemo(() => {
     const tagCounts = new Map<string, number>();
     templates.forEach(t => {
@@ -36,45 +93,6 @@ export default function Explore() {
       .slice(0, 20)
       .map(([tag]) => tag);
   }, [templates]);
-
-  const filteredTemplates = useMemo(() => {
-    let filtered = templates;
-
-    // Backend already hides API-node workflows when no key is configured.
-    // The Source select is only shown when a key exists.
-    if (sourceFilter === 'open') {
-      filtered = filtered.filter(t => t.openSource !== false);
-    } else if (sourceFilter === 'api') {
-      filtered = filtered.filter(t => t.openSource === false);
-    }
-
-    if (activeCategory !== 'All') {
-      filtered = filtered.filter(t =>
-        t.category === activeCategory
-      );
-    }
-
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      filtered = filtered.filter(t =>
-        t.title.toLowerCase().includes(q) ||
-        t.name.toLowerCase().includes(q) ||
-        t.description.toLowerCase().includes(q) ||
-        (t.category || '').toLowerCase().includes(q) ||
-        (t.username || '').toLowerCase().includes(q) ||
-        t.models.some(m => m.toLowerCase().includes(q)) ||
-        t.tags.some(tag => tag.toLowerCase().includes(q))
-      );
-    }
-
-    if (activeTags.length > 0) {
-      filtered = filtered.filter(t =>
-        activeTags.some(tag => t.tags.includes(tag))
-      );
-    }
-
-    return filtered;
-  }, [templates, apiKeyConfigured, sourceFilter, activeCategory, searchQuery, activeTags]);
 
   const toggleTag = (tag: string) => {
     setActiveTags(prev =>
@@ -92,7 +110,15 @@ export default function Explore() {
     return counts;
   }, [templates]);
 
-  const hasActiveFilters = activeCategory !== 'All' || !!searchQuery || activeTags.length > 0 || sourceFilter !== 'all';
+  const hasActiveFilters =
+    activeCategory !== 'All' ||
+    !!searchQuery ||
+    activeTags.length > 0 ||
+    sourceFilter !== 'all' ||
+    readyFilter !== 'all';
+  // Keep the unused apiKeyConfigured reference deliberate: the sidebar shows
+  // the Source select when a key is configured.
+  void apiKeyConfigured;
 
   return (
     <>
@@ -100,14 +126,26 @@ export default function Explore() {
         title="Explore"
         description={`${templates.length} workflows available`}
         right={
-          <button
-            onClick={() => setFiltersOpen(o => !o)}
-            className="btn-secondary lg:hidden"
-            aria-label="Toggle filters"
-          >
-            <SlidersHorizontal className="w-3.5 h-3.5" />
-            Filters
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="btn-secondary"
+              aria-label="Refresh templates"
+              title="Re-pull template catalog from ComfyUI and recompute readiness"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+              {refreshing ? 'Refreshing...' : 'Refresh'}
+            </button>
+            <button
+              onClick={() => setFiltersOpen(o => !o)}
+              className="btn-secondary lg:hidden"
+              aria-label="Toggle filters"
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+              Filters
+            </button>
+          </div>
         }
       />
       <div className="page-container">
@@ -146,6 +184,21 @@ export default function Explore() {
                   </Select>
                 </div>
               )}
+
+              {/* Ready to use */}
+              <div>
+                <label className="field-label mb-1.5 block">Ready to use</label>
+                <Select value={readyFilter} onValueChange={(v) => setReadyFilter(v as ReadyFilter)}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All</SelectItem>
+                    <SelectItem value="yes">Ready</SelectItem>
+                    <SelectItem value="no">Missing deps</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
 
               {/* Category */}
               <div>
@@ -193,13 +246,13 @@ export default function Explore() {
               <div className="pt-4 border-t border-slate-200">
                 <label className="field-label mb-3 block">Stats</label>
                 <div className="grid grid-cols-2 gap-2">
-                  <div className="rounded-md bg-slate-50 ring-1 ring-inset ring-slate-200 px-3 py-2">
-                    <p className="text-[10px] font-medium uppercase tracking-wide text-slate-500">Total</p>
-                    <p className="text-lg font-bold text-slate-700 leading-tight mt-0.5">{templates.length}</p>
+                  <div className="stat-box bg-slate-50 ring-slate-200">
+                    <p className="stat-box-label text-slate-500">Total</p>
+                    <p className="stat-box-value text-slate-700">{templates.length}</p>
                   </div>
-                  <div className="rounded-md bg-teal-50 ring-1 ring-inset ring-teal-100 px-3 py-2">
-                    <p className="text-[10px] font-medium uppercase tracking-wide text-teal-700/70">Filtered</p>
-                    <p className="text-lg font-bold text-teal-700 leading-tight mt-0.5">{filteredTemplates.length}</p>
+                  <div className="stat-box bg-teal-50 ring-teal-100">
+                    <p className="stat-box-label text-teal-700/70">Filtered</p>
+                    <p className="stat-box-value text-teal-700">{paged.total}</p>
                   </div>
                 </div>
               </div>
@@ -207,7 +260,7 @@ export default function Explore() {
               {/* Clear filters */}
               <div className="pt-4 border-t border-slate-200">
                 <button
-                  onClick={() => { setActiveCategory('All'); setSearchQuery(''); setActiveTags([]); setSourceFilter('all'); }}
+                  onClick={() => { setActiveCategory('All'); setSearchQuery(''); setActiveTags([]); setSourceFilter('all'); setReadyFilter('all'); }}
                   className="btn-secondary w-full justify-center"
                   disabled={!hasActiveFilters}
                 >
@@ -219,6 +272,26 @@ export default function Explore() {
 
             {/* ===== Right content ===== */}
             <main className="flex-1 p-4 overflow-y-auto">
+              {refreshBanner && (
+                <div
+                  role="status"
+                  className={`mb-3 flex items-start justify-between gap-2 rounded-md px-3 py-2 text-xs ring-1 ring-inset ${
+                    refreshBanner.kind === 'success'
+                      ? 'badge-emerald'
+                      : 'badge-rose'
+                  }`}
+                >
+                  <span className="font-medium">{refreshBanner.message}</span>
+                  <button
+                    type="button"
+                    onClick={() => setRefreshBanner(null)}
+                    className="text-current/60 hover:text-current"
+                    aria-label="Dismiss"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
               {templates.length === 0 ? (
                 <div className="text-center py-20">
                   {!connected ? (
@@ -253,13 +326,25 @@ export default function Explore() {
                   <Layers className="w-10 h-10 text-slate-200 mx-auto mb-3" />
                   <p className="text-sm text-slate-500">No workflows match your filters</p>
                   <button
-                    onClick={() => { setActiveCategory('All'); setSearchQuery(''); setActiveTags([]); setSourceFilter('all'); }}
+                    onClick={() => { setActiveCategory('All'); setSearchQuery(''); setActiveTags([]); setSourceFilter('all'); setReadyFilter('all'); }}
                     className="text-xs text-teal-600 hover:text-teal-700 mt-2"
                   >
                     Clear filters
                   </button>
                 </div>
               )}
+
+              <div className="mt-4">
+                <Pagination
+                  page={paged.page}
+                  pageSize={paged.pageSize}
+                  total={paged.total}
+                  hasMore={paged.hasMore}
+                  onPageChange={paged.setPage}
+                  onPageSizeChange={paged.setPageSize}
+                  className="rounded-lg border border-slate-200 bg-slate-50"
+                />
+              </div>
             </main>
           </div>
         </div>

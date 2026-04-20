@@ -4,7 +4,6 @@
 // install.
 
 import fs from 'fs';
-import path from 'path';
 import { env } from '../../config/env.js';
 import { paths } from '../../config/paths.js';
 import { atomicWrite } from '../../lib/fs.js';
@@ -31,7 +30,7 @@ export interface LaunchOptionsConfig {
 }
 
 function configFilePath(): string {
-  return path.join(paths.dataDir, 'comfyui-launch-options.json');
+  return paths.launchOptionsPath;
 }
 
 // Apply a CLI args string onto a base items list. Tokens starting with '-'

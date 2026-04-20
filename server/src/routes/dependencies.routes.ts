@@ -8,6 +8,7 @@
 
 import { Router, type Request, type Response } from 'express';
 import * as catalog from '../services/catalog.js';
+import * as templatesSvc from '../services/templates/index.js';
 import { collectAllWorkflowNodes, LOADER_TYPES } from '../services/workflow/index.js';
 import { statModelOnDisk } from '../lib/fs.js';
 import { paths } from '../config/paths.js';
@@ -152,6 +153,12 @@ function buildRequiredList(
 
 async function fetchTemplateNodes(templateName: string): Promise<WorkflowNode[]> {
   try {
+    // User-imported workflows live on our disk; only hit ComfyUI for the rest.
+    if (templatesSvc.isUserWorkflow(templateName)) {
+      const local = templatesSvc.getUserWorkflowJson(templateName);
+      if (!local) return [];
+      return collectAllWorkflowNodes(local);
+    }
     const wfRes = await fetch(
       `${COMFYUI_URL}/templates/${encodeURIComponent(templateName)}.json`,
     );

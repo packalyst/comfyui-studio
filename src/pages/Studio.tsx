@@ -3,6 +3,7 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Image as ImageIcon, Film, Music, Box, Wrench,
   Loader2, Download, AlertTriangle, CheckCircle2,
+  ScrollText,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import CompareSlider from '../components/CompareSlider';
@@ -12,6 +13,8 @@ import ModelDropdown from '../components/ModelDropdown';
 import JsonEditor from '../components/JsonEditor';
 import DependencyModal from '../components/DependencyModal';
 import ExposeWidgetsModal from '../components/ExposeWidgetsModal';
+import LogsDrawer from '../components/LogsDrawer';
+import { Tooltip, TooltipTrigger, TooltipContent } from '../components/ui/tooltip';
 import { api } from '../services/comfyui';
 import type { StudioCategory, Template, DependencyCheck, AdvancedSetting } from '../types';
 import { Settings2 } from 'lucide-react';
@@ -104,6 +107,30 @@ export default function Studio() {
   // "Expose fields" modal state
   const [showExposeModal, setShowExposeModal] = useState(false);
   const [hasEditableWidgets, setHasEditableWidgets] = useState(false);
+
+  // Auto-open the expose modal once, when a ?expose=1 URL param lands — used
+  // by the "Import as template" flow to drop the user straight into widget
+  // review. Fires once per selectedTemplate, after we've confirmed the
+  // workflow has editable widgets to review.
+  const [autoExposeHandled, setAutoExposeHandled] = useState(false);
+  useEffect(() => {
+    if (autoExposeHandled) return;
+    if (!selectedTemplate) return;
+    if (!hasEditableWidgets) return;
+    if (searchParams.get('expose') !== '1') return;
+    setShowExposeModal(true);
+    setAutoExposeHandled(true);
+    // Strip the flag from the URL so reloads don't re-open the modal.
+    const next = new URLSearchParams(searchParams);
+    next.delete('expose');
+    navigate(
+      { pathname: `/studio/${encodeURIComponent(selectedTemplate)}`, search: next.toString() ? `?${next.toString()}` : '' },
+      { replace: true },
+    );
+  }, [selectedTemplate, hasEditableWidgets, searchParams, autoExposeHandled, navigate]);
+
+  // ComfyUI logs drawer
+  const [showLogs, setShowLogs] = useState(false);
 
   // Filter templates by active category
   const categoryTemplates = useMemo(() => {
@@ -359,6 +386,9 @@ export default function Studio() {
           }}
         />
       )}
+      {/* ComfyUI logs drawer */}
+      <LogsDrawer open={showLogs} onClose={() => setShowLogs(false)} />
+
       {/* Dependency Modal */}
       {showDepModal && depCheck && depCheck.missing.length > 0 && (
         <DependencyModal
@@ -532,7 +562,7 @@ export default function Studio() {
               </div>
               <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-teal-500 rounded-full transition-all duration-300"
+                  className="progress-bar-fill"
                   style={{ width: `${Math.min(100, Math.max(0, currentJob.progress))}%` }}
                 />
               </div>
@@ -576,18 +606,32 @@ export default function Studio() {
         {/* Result header */}
         <div className="flex items-center justify-between px-6 py-3 border-b border-gray-200 bg-white">
           <h3 className="font-semibold text-gray-900">Result</h3>
-          {canCompare && (
-            <button
-              onClick={() => setShowCompare(!showCompare)}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide transition-colors ${
-                showCompare
-                  ? 'bg-blue-100 text-blue-700'
-                  : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
-              }`}
-            >
-              Compare
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            {canCompare && (
+              <button
+                onClick={() => setShowCompare(!showCompare)}
+                className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide transition-colors ${
+                  showCompare
+                    ? 'bg-blue-100 text-blue-700'
+                    : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                }`}
+              >
+                Compare
+              </button>
+            )}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => setShowLogs(true)}
+                  className="btn-icon"
+                  aria-label="Open ComfyUI logs"
+                >
+                  <ScrollText className="w-4 h-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>ComfyUI logs</TooltipContent>
+            </Tooltip>
+          </div>
         </div>
 
         {/* Result content */}

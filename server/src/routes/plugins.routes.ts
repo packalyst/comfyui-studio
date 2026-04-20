@@ -10,6 +10,7 @@ import { Router, type RequestHandler } from 'express';
 import * as plugins from '../services/plugins/plugins.service.js';
 import { sendError } from '../middleware/errors.js';
 import { rateLimit } from '../middleware/rateLimit.js';
+import { parsePageQuery, paginate } from '../lib/pagination.js';
 
 const router = Router();
 
@@ -22,7 +23,33 @@ const handleGetAll: RequestHandler = async (req, res) => {
   try {
     const forceRefresh = req.query.force === 'true';
     if (forceRefresh) plugins.cache.refreshInstalledPlugins();
-    res.json(plugins.cache.getAllPlugins(forceRefresh));
+    const all = plugins.cache.getAllPlugins(forceRefresh);
+    const pq = parsePageQuery(req, { defaultPageSize: 50, maxPageSize: 200 });
+    if (!pq.isPaginated) { res.json(all); return; }
+
+    // When paginating we need the filters to apply globally, not just to the
+    // current page — otherwise e.g. "installed" could show empty pages while
+    // other pages have installed plugins. Filter + sort BEFORE slicing.
+    const q = typeof req.query.q === 'string' ? req.query.q.toLowerCase().trim() : '';
+    const filter = typeof req.query.filter === 'string' ? req.query.filter : 'all';
+    let rows = all;
+    if (filter === 'installed') rows = rows.filter((p) => p.installed);
+    else if (filter === 'available') rows = rows.filter((p) => !p.installed);
+    if (q) {
+      rows = rows.filter((p) =>
+        (p.name ?? '').toLowerCase().includes(q) ||
+        (p.id ?? '').toLowerCase().includes(q) ||
+        (p.description ?? '').toLowerCase().includes(q) ||
+        (p.author ?? '').toLowerCase().includes(q) ||
+        (Array.isArray(p.tags) && p.tags.some((t) => (t ?? '').toLowerCase().includes(q))),
+      );
+    }
+    rows = [...rows].sort((a, b) => {
+      if (a.installed !== b.installed) return a.installed ? -1 : 1;
+      return (a.name || a.id).localeCompare(b.name || b.id);
+    });
+
+    res.json(paginate(rows, pq.page, pq.pageSize));
   } catch (err) { sendError(res, err, 500, 'Failed to get plugin list'); }
 };
 
@@ -123,16 +150,29 @@ const handleSwitchVersion: RequestHandler = async (req, res) => {
 
 const handleUpdateCache: RequestHandler = async (_req, res) => {
   try {
-    plugins.cache.clearCache();
+    // Refresh both the in-memory overlay cache and the sqlite catalog
+    // table from the current mirror JSON, so sqlite never drifts from the
+    // bundled source of truth after an operator bumps the mirror.
+    plugins.cache.reseedFromMirror();
     const list = plugins.cache.getAllPlugins(true);
     res.json({ success: true, message: 'Cache updated', nodesCount: list.length });
   } catch (err) { sendError(res, err, 500, 'Update failed'); }
 };
 
 const handleHistory: RequestHandler = async (req, res) => {
-  const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 100;
-  try { res.json({ success: true, history: plugins.history.getHistory(limit) }); }
-  catch (err) { sendError(res, err, 500, 'Failed to get history'); }
+  try {
+    const pq = parsePageQuery(req, { defaultPageSize: 20, maxPageSize: 100 });
+    if (!pq.isPaginated) {
+      // Back-compat: old callers pass ?limit=N and receive { success, history }.
+      const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 100;
+      res.json({ success: true, history: plugins.history.getHistory(limit) });
+      return;
+    }
+    // Paginated: page through the full stored history (capped at 100 upstream).
+    const all = plugins.history.getHistory(100);
+    const env = paginate(all, pq.page, pq.pageSize);
+    res.json({ success: true, ...env });
+  } catch (err) { sendError(res, err, 500, 'Failed to get history'); }
 };
 
 const handleLogs: RequestHandler = async (req, res) => {

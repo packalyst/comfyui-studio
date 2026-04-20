@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { ChevronDown, Search } from 'lucide-react';
 import type { Template } from '../types';
 
@@ -40,13 +40,28 @@ export default function ModelDropdown({ templates, selected, onSelect }: Props) 
   const containerRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  const selectedTemplate = templates.find(t => t.name === selected);
+  const selectedTemplate = useMemo(
+    () => templates.find(t => t.name === selected),
+    [templates, selected],
+  );
 
-  const filtered = templates.filter(t => {
-    if (!search.trim()) return true;
-    const q = search.toLowerCase();
-    return t.title.toLowerCase().includes(q) || t.models.some(m => m.toLowerCase().includes(q));
-  });
+  const selectedInitialColor = useMemo(
+    () => (selectedTemplate ? getInitialColor(selectedTemplate.title) : ''),
+    [selectedTemplate],
+  );
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return templates;
+    return templates.filter(t =>
+      t.title.toLowerCase().includes(q) || t.models.some(m => m.toLowerCase().includes(q)),
+    );
+  }, [templates, search]);
+
+  const filteredColors = useMemo(
+    () => filtered.map(t => getInitialColor(t.title)),
+    [filtered],
+  );
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -74,7 +89,7 @@ export default function ModelDropdown({ templates, selected, onSelect }: Props) 
       >
         {selectedTemplate ? (
           <>
-            <span className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${getInitialColor(selectedTemplate.title)}`}>
+            <span className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${selectedInitialColor}`}>
               {getInitial(selectedTemplate.title)}
             </span>
             <div className="flex-1 min-w-0">
@@ -107,7 +122,7 @@ export default function ModelDropdown({ templates, selected, onSelect }: Props) 
             {filtered.length === 0 ? (
               <p className="text-xs text-gray-400 py-4 text-center">No models found</p>
             ) : (
-              filtered.map(t => (
+              filtered.map((t, i) => (
                 <button
                   key={t.name}
                   type="button"
@@ -120,7 +135,7 @@ export default function ModelDropdown({ templates, selected, onSelect }: Props) 
                     t.name === selected ? 'bg-teal-50' : ''
                   }`}
                 >
-                  <span className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${getInitialColor(t.title)}`}>
+                  <span className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${filteredColors[i]}`}>
                     {getInitial(t.title)}
                   </span>
                   <div className="flex-1 min-w-0">

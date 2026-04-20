@@ -37,8 +37,14 @@ RUN npm prune --omit=dev
 
 # ======================================================================
 # Stage: studio-server-build — compile TS → dist, prune dev deps.
+# `nodejs24-devel` is required because `better-sqlite3` is a native C++
+# addon and civitai does not yet publish prebuilt binaries for Node 24 —
+# `npm ci` falls back to building from source via node-gyp, which needs
+# the headers at `/usr/include/node24/common.gypi`.
 # ======================================================================
 FROM ${BASE_IMAGE} AS studio-server-build
+RUN zypper --non-interactive --no-refresh install -y nodejs24-devel \
+  && zypper clean -a
 WORKDIR /build/studio-server
 COPY server/package.json server/package-lock.json ./
 RUN npm ci --include=dev
@@ -84,8 +90,13 @@ CMD ["/app/start.sh"]
 # Stage: dev — source + dev deps + tsx + vite, ready for hot-reload.
 #   Intended to be run with `STUDIO_MODE=dev`, optionally with host source
 #   bind-mounted over /studio and /app/server to live-edit from your laptop.
+#   `nodejs24-devel` is kept around so an in-pod `npm rebuild` (triggered
+#   when the hostPath-mounted node_modules mismatches the container arch)
+#   can rebuild `better-sqlite3` without failing on missing headers.
 # ======================================================================
 FROM ${BASE_IMAGE} AS dev
+RUN zypper --non-interactive --no-refresh install -y nodejs24-devel \
+  && zypper clean -a
 
 # Drop the baked-in launcher & old SPA.
 RUN rm -rf /app/server /app/dist/spa

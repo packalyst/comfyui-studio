@@ -143,7 +143,7 @@ function CardHeader({
   right?: React.ReactNode;
 }) {
   return (
-    <div className="panel-header flex items-start justify-between gap-3">
+    <div className="panel-header-row">
       <div className="flex items-start gap-2">
         <Icon className="w-3.5 h-3.5 text-slate-400 mt-0.5" />
         <div>
@@ -188,7 +188,7 @@ function Toggle({
    ================================================================= */
 
 function ApiKeyCard() {
-  const { apiKeyConfigured: configured, refreshApiKeyStatus, refreshTemplates } = useApp();
+  const { apiKeyConfigured: configured, refreshSystem, refreshTemplates } = useApp();
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -199,7 +199,7 @@ function ApiKeyCard() {
     setBusy(true);
     try {
       await api.setApiKey(apiKey.trim());
-      await Promise.all([refreshApiKeyStatus(), refreshTemplates()]);
+      await Promise.all([refreshSystem(), refreshTemplates()]);
       setApiKey('');
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -212,7 +212,7 @@ function ApiKeyCard() {
     setBusy(true);
     try {
       await api.clearApiKey();
-      await Promise.all([refreshApiKeyStatus(), refreshTemplates()]);
+      await Promise.all([refreshSystem(), refreshTemplates()]);
       setApiKey('');
     } finally {
       setBusy(false);
@@ -282,7 +282,7 @@ function ApiKeyCard() {
    ================================================================= */
 
 function HfTokenCard() {
-  const { hfTokenConfigured: configured, refreshHfTokenStatus } = useApp();
+  const { hfTokenConfigured: configured, refreshSystem } = useApp();
   const [token, setToken] = useState('');
   const [showToken, setShowToken] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -293,7 +293,7 @@ function HfTokenCard() {
     setBusy(true);
     try {
       await api.setHfToken(token.trim());
-      await refreshHfTokenStatus();
+      await refreshSystem();
       setToken('');
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -306,7 +306,7 @@ function HfTokenCard() {
     setBusy(true);
     try {
       await api.clearHfToken();
-      await refreshHfTokenStatus();
+      await refreshSystem();
       setToken('');
     } finally {
       setBusy(false);
@@ -351,6 +351,102 @@ function HfTokenCard() {
             Create a <strong>read</strong> token at <code>huggingface.co/settings/tokens</code>.
             Stored server-side in the same config file as the API key; sent as
             <code> Authorization: Bearer</code> on HEAD/GET calls for gated HuggingFace URLs.
+          </p>
+        </div>
+      </div>
+      <div className="panel-footer">
+        <p className="panel-footer-note">Changes are applied immediately.</p>
+        <div className="btn-group">
+          {configured && (
+            <button onClick={handleClear} disabled={busy} className="btn-secondary !text-red-600 hover:!bg-red-50">
+              <Trash2 className="h-3.5 w-3.5" />
+              Clear
+            </button>
+          )}
+          <button onClick={handleSave} disabled={saveDisabled} className="btn-primary">
+            {saved ? <Check className="h-3.5 w-3.5" /> : <Save className="h-3.5 w-3.5" />}
+            {saved ? 'Saved' : configured ? 'Replace' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/* =================================================================
+   1c. CivitAI Token Card
+   ================================================================= */
+
+function CivitaiTokenCard() {
+  const { civitaiTokenConfigured: configured, refreshSystem } = useApp();
+  const [token, setToken] = useState('');
+  const [showToken, setShowToken] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const handleSave = async () => {
+    if (!token.trim()) return;
+    setBusy(true);
+    try {
+      await api.setCivitaiToken(token.trim());
+      await refreshSystem();
+      setToken('');
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleClear = async () => {
+    setBusy(true);
+    try {
+      await api.clearCivitaiToken();
+      await refreshSystem();
+      setToken('');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveDisabled = busy || token.trim().length === 0;
+
+  return (
+    <section className="panel">
+      <CardHeader
+        icon={Key}
+        title="CivitAI Token"
+        description="Adds authentication for civitai.com downloads (LoRAs, workflows) and gated items."
+        right={<StatusBadge ok={configured} labelOk="Configured" labelBad="Not set" />}
+      />
+      <div className="space-y-3 panel-body">
+        <label className="field-label">
+          Access token
+        </label>
+        <div className="field-wrap">
+          <input
+            type={showToken ? 'text' : 'password'}
+            value={token}
+            onChange={e => setToken(e.target.value)}
+            className="field-input font-mono"
+            placeholder={configured ? 'Token is set — type a new one to replace' : 'CivitAI API key'}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <button
+            type="button"
+            onClick={() => setShowToken(v => !v)}
+            className="text-slate-400 transition hover:text-slate-700"
+            aria-label={showToken ? 'Hide token' : 'Show token'}
+          >
+            {showToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+          </button>
+        </div>
+        <div className="info-box">
+          <p>
+            Create an API key on <code>civitai.com/user/account</code>. Stored
+            server-side; attached as <code>Authorization: Bearer</code> to
+            civitai.com HEAD/GET requests. Never echoed back to the browser.
           </p>
         </div>
       </div>
@@ -1137,18 +1233,20 @@ export default function Settings() {
   return (
     <>
       <PageSubbar title="Settings" description="Configure your workspace" />
-      <div className="page-container">
-        <div className="grid gap-3 xl:grid-cols-[1fr,0.95fr]">
-          <div className="space-y-3">
-            <ApiKeyCard />
-            <HfTokenCard />
-            <LaunchOptionsCard />
-          </div>
-          <div className="space-y-3">
-            <StorageCard />
-            <NetworkCard />
-          </div>
+      <div className="page-container space-y-3">
+        {/* API keys row — Comfy Org | HuggingFace | CivitAI */}
+        <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+          <ApiKeyCard />
+          <HfTokenCard />
+          <CivitaiTokenCard />
         </div>
+        {/* Storage + Network row */}
+        <div className="grid gap-3 md:grid-cols-2">
+          <StorageCard />
+          <NetworkCard />
+        </div>
+        {/* Launch options — full width */}
+        <LaunchOptionsCard />
       </div>
     </>
   );

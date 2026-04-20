@@ -11,6 +11,12 @@
 set -e
 mkdir -p /app/logs
 
+# ComfyUI's /root/ComfyUI/.git dir is surfaced with host-side ownership via the
+# hostPath mount, so git refuses to operate ("dubious ownership"). Trust it so
+# ComfyUI-Manager's Update flow (git fetch/checkout via the pod's git) works.
+git config --global --add safe.directory /root/ComfyUI 2>/dev/null || true
+git config --global --add safe.directory '*' 2>/dev/null || true
+
 if [ "${STUDIO_MODE}" = "dev" ]; then
   # Dev: the host mounts the source folders over these paths, so node_modules must exist.
   (cd /app/server      && [ -d node_modules ] || npm install --include=dev)

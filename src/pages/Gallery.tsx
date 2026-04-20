@@ -1,12 +1,15 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Download, Trash2, Star, StarOff, Check, X,
   Image as ImageIcon, Video, Music, ArrowRight, SlidersHorizontal,
   LayoutGrid, CheckSquare,
 } from 'lucide-react';
-import { useApp } from '../context/AppContext';
+import type { GalleryItem } from '../types';
+import { api } from '../services/comfyui';
 import { usePersistedState } from '../hooks/usePersistedState';
+import { usePaginated } from '../hooks/usePaginated';
+import Pagination from '../components/Pagination';
 import PageSubbar from '../components/PageSubbar';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Checkbox } from '../components/ui/checkbox';
@@ -15,12 +18,8 @@ type FilterType = 'all' | 'image' | 'video' | 'audio';
 type SortBy = 'newest' | 'oldest';
 
 export default function Gallery() {
-  const { gallery, refreshGallery } = useApp();
   const navigate = useNavigate();
 
-  useEffect(() => {
-    refreshGallery();
-  }, [refreshGallery]);
   const [filter, setFilter] = usePersistedState<FilterType>('gallery.filter', 'all');
   const [sortBy, setSortBy] = usePersistedState<SortBy>('gallery.sortBy', 'newest');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -32,21 +31,25 @@ export default function Gallery() {
     return saved ? new Set(JSON.parse(saved)) : new Set();
   });
 
+  // Server-paginated: media-type + sort apply globally; favorites stay
+  // client-side (localStorage) so they filter the current page only.
+  const fetcher = useCallback(
+    async ({ page, pageSize }: { page: number; pageSize: number }) => {
+      const res = await api.getGalleryPaged(page, pageSize, {
+        mediaType: filter !== 'all' ? filter : undefined,
+        sort: sortBy,
+      });
+      return { items: res.items, total: res.total, hasMore: res.hasMore };
+    },
+    [filter, sortBy],
+  );
+  const paged = usePaginated<GalleryItem>(fetcher, { deps: [filter, sortBy] });
+  const { items: pageItems } = paged;
+
   const filteredGallery = useMemo(() => {
-    let items = [...gallery];
-    if (filter !== 'all') {
-      items = items.filter(item => item.mediaType === filter);
-    }
-    if (onlyFavorites) {
-      items = items.filter(item => favorites.has(item.id));
-    }
-    items.sort((a, b) => {
-      const da = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-      const db = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-      return sortBy === 'newest' ? db - da : da - db;
-    });
-    return items;
-  }, [gallery, filter, sortBy, onlyFavorites, favorites]);
+    if (!onlyFavorites) return pageItems;
+    return pageItems.filter((item) => favorites.has(item.id));
+  }, [pageItems, onlyFavorites, favorites]);
 
   const toggleSelect = (id: string) => {
     setSelectedIds(prev => {
@@ -81,7 +84,7 @@ export default function Gallery() {
     <>
       <PageSubbar
         title="Gallery"
-        description={`${gallery.length} generations`}
+        description={`${paged.total} generations`}
         right={
           bulkSelecting ? (
             <div className="flex items-center gap-2">
@@ -180,13 +183,13 @@ export default function Gallery() {
               <div className="pt-4 border-t border-slate-200">
                 <label className="field-label mb-3 block">Stats</label>
                 <div className="grid grid-cols-2 gap-2">
-                  <div className="rounded-md bg-slate-50 ring-1 ring-inset ring-slate-200 px-3 py-2">
-                    <p className="text-[10px] font-medium uppercase tracking-wide text-slate-500">Total</p>
-                    <p className="text-lg font-bold text-slate-700 leading-tight mt-0.5">{gallery.length}</p>
+                  <div className="stat-box bg-slate-50 ring-slate-200">
+                    <p className="stat-box-label text-slate-500">Total</p>
+                    <p className="stat-box-value text-slate-700">{paged.total}</p>
                   </div>
-                  <div className="rounded-md bg-amber-50 ring-1 ring-inset ring-amber-100 px-3 py-2">
-                    <p className="text-[10px] font-medium uppercase tracking-wide text-amber-700/70">Favorites</p>
-                    <p className="text-lg font-bold text-amber-700 leading-tight mt-0.5">{favorites.size}</p>
+                  <div className="stat-box bg-amber-50 ring-amber-100">
+                    <p className="stat-box-label text-amber-700/70">Favorites</p>
+                    <p className="stat-box-value text-amber-700">{favorites.size}</p>
                   </div>
                 </div>
               </div>
@@ -269,6 +272,18 @@ export default function Gallery() {
                   )}
                 </div>
               )}
+
+              <div className="mt-4">
+                <Pagination
+                  page={paged.page}
+                  pageSize={paged.pageSize}
+                  total={paged.total}
+                  hasMore={paged.hasMore}
+                  onPageChange={paged.setPage}
+                  onPageSizeChange={paged.setPageSize}
+                  className="rounded-lg border border-slate-200 bg-slate-50"
+                />
+              </div>
             </main>
           </div>
         </div>

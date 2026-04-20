@@ -6,7 +6,8 @@
 import path from 'path';
 import { logger } from '../../lib/logger.js';
 import { env } from '../../config/env.js';
-import { getHfAuthHeaders } from '../../lib/http.js';
+import { getHfAuthHeaders, getHostAuthHeaders } from '../../lib/http.js';
+import * as bus from '../../lib/events.js';
 import {
   getModelList, getModelInfo, updateCache, convertEssentialModelsToEntries,
 } from './info.service.js';
@@ -15,8 +16,8 @@ import {
   inferModelType, getModelSaveDir,
 } from './install.service.js';
 import {
-  buildDownloadUrl, processHfEndpoint, validateHfUrl, buildResolveUrl,
-  ensureSaveDirectory, resolveOutputPath,
+  buildDownloadUrl, processHfEndpoint, validateHfUrl, validateCivitaiUrl,
+  detectDownloadHost, buildResolveUrl, ensureSaveDirectory, resolveOutputPath,
 } from './download.service.js';
 import type { CatalogModelEntry } from './download.service.js';
 import {
@@ -110,41 +111,63 @@ export async function installFromCatalog(
 
   void downloadModelByName(modelName, url, outputPath, taskId, {
     source, authHeaders: getHfAuthHeaders(url, hfToken),
+  }).then(() => {
+    // Notify readiness subscribers that a new file landed on disk. Rescan
+    // is best-effort; readiness hooks run their own scan.
+    bus.emit('model:installed', { filename: modelName });
+    scanAndRefresh().catch(() => { /* best effort */ });
   }).catch((err) => {
-    logger.error('install download failed', {
-      modelName,
-      message: err instanceof Error ? err.message : String(err),
-    });
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error('install download failed', { modelName, message: msg });
+    bus.emit('model:download-failed', { filename: modelName, error: msg });
   });
   return { taskId, fileName: modelName };
 }
 
-/** Start a custom download (by HF URL). */
+/**
+ * Start a custom download. Accepts huggingface.co / hf-mirror.com / civitai.com
+ * URLs; dispatches auth + filename-parsing based on the host family. Civitai
+ * downloads REQUIRE `filenameOverride` since their URL does not encode one.
+ */
 export async function downloadCustom(
-  hfUrl: string,
+  srcUrl: string,
   modelDir: string,
-  hfToken?: string,
+  tokens: { hfToken?: string; civitaiToken?: string },
+  filenameOverride?: string,
 ): Promise<{ taskId: string; fileName: string; saveDir: string }> {
-  if (!hfUrl) throw new Error('Hugging Face URL cannot be empty');
+  if (!srcUrl) throw new Error('URL cannot be empty');
   if (!modelDir) throw new Error('Model directory cannot be empty');
-  const v = validateHfUrl(hfUrl);
-  if (!v.isValid) throw new Error(v.error || 'Invalid URL');
-  const fileName = v.fileName;
 
-  // Dedup against the model-name index: launcher's download-custom also
-  // registers under the filename, and studio's outer layer expects that.
+  const host = detectDownloadHost(srcUrl);
+  let fileName: string;
+  let url: string;
+
+  if (host === 'huggingface') {
+    const v = validateHfUrl(srcUrl);
+    if (!v.isValid) throw new Error(v.error || 'Invalid URL');
+    fileName = filenameOverride && filenameOverride.trim().length > 0 ? filenameOverride : v.fileName;
+    url = processHfEndpoint(buildResolveUrl(srcUrl));
+  } else if (host === 'civitai') {
+    const v = validateCivitaiUrl(srcUrl);
+    if (!v.isValid) throw new Error(v.error || 'Invalid URL');
+    if (!filenameOverride || filenameOverride.trim().length === 0) {
+      throw new Error('CivitAI downloads require an explicit filename (pass `filename` on the request body)');
+    }
+    fileName = filenameOverride;
+    url = srcUrl;
+  } else {
+    throw new Error('Unsupported host: only huggingface.co, hf-mirror.com, and civitai.com are allowed');
+  }
+
   const existing = getModelTaskId(fileName);
   if (existing) return { taskId: existing, fileName, saveDir: modelDir };
-
-  let url = buildResolveUrl(hfUrl);
-  url = processHfEndpoint(url);
 
   const taskId = createDownloadTask();
   setModelMapping(fileName, taskId);
   const saveDir = `models/${modelDir}`;
   ensureSaveDirectory(saveDir);
   const outputPath = path.join(env.COMFYUI_PATH, saveDir, fileName);
-  logger.info('custom download starting', { url, path: outputPath });
+  logger.info('custom download starting', { url, path: outputPath, host });
 
   addHistoryItem({
     id: randomUUID(),
@@ -159,15 +182,18 @@ export async function downloadCustom(
   const progress = getTaskProgress(taskId);
   if (progress) progress.abortController = new AbortController();
 
+  const authHeaders = getHostAuthHeaders(url, tokens);
+
   void downloadModelByName(fileName, url, outputPath, taskId, {
-    source: 'custom', authHeaders: getHfAuthHeaders(url, hfToken),
+    source: 'custom', authHeaders,
   }).then(() => {
     // Rescan so the installed flag flips immediately after completion.
+    bus.emit('model:installed', { filename: fileName });
     scanAndRefresh().catch(() => { /* best effort */ });
   }).catch((err) => {
-    logger.error('custom download failed', {
-      message: err instanceof Error ? err.message : String(err),
-    });
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error('custom download failed', { message: msg });
+    bus.emit('model:download-failed', { filename: fileName, error: msg });
   });
   return { taskId, fileName, saveDir };
 }

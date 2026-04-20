@@ -4,7 +4,7 @@
 import { env } from '../../config/env.js';
 import { fetchWithRetry } from '../../lib/http.js';
 import { logger } from '../../lib/logger.js';
-import { encodeQuery, type PageQuery } from './models.js';
+import { encodeQuery, type PageQuery, type CivitaiListResponse } from './models.js';
 
 function apiBase(): string { return env.CIVITAI_API_BASE; }
 function maxBytes(): number { return env.CIVITAI_MAX_RESPONSE_BYTES; }
@@ -47,15 +47,70 @@ function buildParams(q: PageQuery, defaultLimit: number, sort: string, period?: 
 }
 
 /** Latest workflows (Newest). */
-export async function getLatestWorkflows(q: PageQuery): Promise<unknown> {
+export async function getLatestWorkflows(q: PageQuery): Promise<CivitaiListResponse> {
   const params = buildParams(q, 24, 'Newest');
   logger.info('civitai latest workflows', { params });
-  return fetchJson(`${apiBase()}/models${encodeQuery(params as unknown as Record<string, string | number | boolean>)}`);
+  return (await fetchJson(
+    `${apiBase()}/models${encodeQuery(params as unknown as Record<string, string | number | boolean>)}`,
+  )) as CivitaiListResponse;
 }
 
 /** Hot workflows (Most Downloaded / Month). */
-export async function getHotWorkflows(q: PageQuery): Promise<unknown> {
+export async function getHotWorkflows(q: PageQuery): Promise<CivitaiListResponse> {
   const params = buildParams(q, 24, 'Most Downloaded', 'Month');
   logger.info('civitai hot workflows', { params });
-  return fetchJson(`${apiBase()}/models${encodeQuery(params as unknown as Record<string, string | number | boolean>)}`);
+  return (await fetchJson(
+    `${apiBase()}/models${encodeQuery(params as unknown as Record<string, string | number | boolean>)}`,
+  )) as CivitaiListResponse;
+}
+
+/**
+ * Resolve a workflow version → a structured description of its primary file.
+ * Used by the "import as template" flow to fetch the underlying workflow JSON
+ * payload. Delegates to the `model-versions/:id` endpoint which always
+ * returns a JSON document (unlike `/download/models/:id` which 302s to the
+ * binary).
+ *
+ * Returns `{ downloadUrl, fileName, type }` on success; throws on 4xx/5xx.
+ */
+export async function getWorkflowVersionFile(versionId: string): Promise<{
+  versionId: string;
+  fileName: string;
+  downloadUrl: string;
+  type: string | null;
+  format: string | null;
+  modelId: number | null;
+  modelName: string | null;
+  isJsonFile: boolean;
+}> {
+  if (!versionId) throw new Error('Missing workflow version ID');
+  const data = await fetchJson(`${apiBase()}/model-versions/${encodeURIComponent(versionId)}`);
+  const d = data as Record<string, unknown>;
+  const files = Array.isArray(d.files) ? d.files as Array<Record<string, unknown>> : [];
+  if (files.length === 0) throw new Error('Workflow version has no downloadable files');
+  // Prefer a JSON file if one is present (rare on civitai — most workflows
+  // ship as .zip archives). Falls back to the primary file otherwise.
+  const jsonFile = files.find((f) => {
+    const name = typeof f.name === 'string' ? f.name.toLowerCase() : '';
+    const type = typeof f.type === 'string' ? f.type.toLowerCase() : '';
+    return name.endsWith('.json') || type === 'config';
+  });
+  const primary = jsonFile ?? files.find((f) => f.primary === true) ?? files[0];
+  const fileName = typeof primary.name === 'string' ? primary.name : `workflow-${versionId}`;
+  const downloadUrl = typeof primary.downloadUrl === 'string' ? primary.downloadUrl : '';
+  if (!downloadUrl) throw new Error('Workflow version has no downloadUrl');
+  const format = typeof (primary.metadata as Record<string, unknown> | undefined)?.format === 'string'
+    ? ((primary.metadata as Record<string, unknown>).format as string)
+    : null;
+  const modelObj = d.model as Record<string, unknown> | undefined;
+  return {
+    versionId,
+    fileName,
+    downloadUrl,
+    type: typeof primary.type === 'string' ? primary.type : null,
+    format,
+    modelId: typeof d.modelId === 'number' ? d.modelId : null,
+    modelName: modelObj && typeof modelObj.name === 'string' ? modelObj.name : null,
+    isJsonFile: fileName.toLowerCase().endsWith('.json'),
+  };
 }

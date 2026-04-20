@@ -6,6 +6,7 @@
 
 import { Router, type Request, type Response } from 'express';
 import * as comfyui from '../services/comfyui.js';
+import * as settings from '../services/settings.js';
 import { getAllDownloads } from '../services/downloads.js';
 
 const router = Router();
@@ -34,6 +35,9 @@ router.get('/system', async (_req: Request, res: Response) => {
       total: gallery.length,
       recent: gallery.slice(0, 8),
     },
+    apiKeyConfigured: settings.isApiKeyConfigured(),
+    hfTokenConfigured: settings.isHfTokenConfigured(),
+    civitaiTokenConfigured: settings.isCivitaiTokenConfigured(),
   });
 });
 

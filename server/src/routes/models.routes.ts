@@ -2,6 +2,15 @@
 // models + download + essential-models controllers). The /launcher/... aliases
 // are preserved for studio's existing frontend; new canonical paths live at
 // /api/models/... via the handlers below.
+//
+// NOTE on /models/download-custom (unified downloader):
+//   The `hfUrl` request-body field is historical; it now accepts both
+//   huggingface.co / hf-mirror.com URLs and civitai.com URLs of the form
+//   `https://civitai.com/api/download/models/:versionId`. The handler routes
+//   each to the correct auth header (HF vs CivitAI bearer token).
+//   CivitAI downloads MUST include an explicit `filename` body field — the
+//   civitai URL itself does not encode the filename (it arrives via
+//   Content-Disposition on the 302 redirect).
 
 import { Router, type Request, type Response, type RequestHandler } from 'express';
 import * as models from '../services/models/models.service.js';
@@ -17,6 +26,8 @@ import {
 import { rateLimit } from '../middleware/rateLimit.js';
 import { sendError } from '../middleware/errors.js';
 import { hostIsPrivate, isHttpUrl } from './models.validation.js';
+import { parsePageQuery, paginate } from '../lib/pagination.js';
+import { prepopulateCatalog, type DownloadCustomMeta } from './models.prepopulate.js';
 
 // Re-export for tests and backward-compat callers.
 export { hostIsPrivate };
@@ -103,10 +114,16 @@ const handleProgress: RequestHandler = async (req, res) => {
   });
 };
 
-const handleHistory: RequestHandler = async (_req, res) => {
+const handleHistory: RequestHandler = async (req, res) => {
   try {
     const history = listHistory();
-    res.json({ success: true, count: history.length, history });
+    const pq = parsePageQuery(req, { defaultPageSize: 20, maxPageSize: 100 });
+    if (!pq.isPaginated) {
+      res.json({ success: true, count: history.length, history });
+      return;
+    }
+    const env = paginate(history, pq.page, pq.pageSize);
+    res.json({ success: true, count: env.total, ...env });
   } catch (err) { sendError(res, err, 500, 'History read failed'); }
 };
 
@@ -123,27 +140,66 @@ const handleHistoryDelete: RequestHandler = async (req, res) => {
   res.json({ success: true, message: `History item deleted: ${removed.modelName}` });
 };
 
+// Allow-listed hosts for the unified download endpoint. `hfUrl` retains its
+// historical name but now accepts huggingface + civitai URLs; see the doc
+// block at the top of the file.
+const DOWNLOAD_ALLOWED_HOSTS = new Set([
+  'huggingface.co', 'www.huggingface.co', 'hf-mirror.com',
+  'civitai.com', 'www.civitai.com',
+]);
+
+function isAllowedDownloadHost(url: string): boolean {
+  try { return DOWNLOAD_ALLOWED_HOSTS.has(new URL(url).hostname.toLowerCase()); }
+  catch { return false; }
+}
+
 const handleDownloadCustom: RequestHandler = async (req: Request, res: Response) => {
   try {
-    const { modelName, filename, hfUrl, modelDir, hfToken } = (req.body || {}) as {
-      modelName?: string; filename?: string; hfUrl?: string; modelDir?: string; hfToken?: string;
+    const { modelName, filename, hfUrl, modelDir, hfToken, civitaiToken, meta } = (req.body || {}) as {
+      modelName?: string; filename?: string; hfUrl?: string; modelDir?: string;
+      hfToken?: string; civitaiToken?: string; meta?: DownloadCustomMeta;
     };
     if (hfUrl !== undefined && !isHttpUrl(hfUrl)) { res.status(400).json({ error: 'hfUrl must be http(s)' }); return; }
     if (hfUrl !== undefined && hostIsPrivate(hfUrl)) { res.status(400).json({ error: 'hfUrl points at a private/loopback host' }); return; }
-    const resolvedFilename = filename || hfUrl?.split('/').pop();
+    if (hfUrl !== undefined && !isAllowedDownloadHost(hfUrl)) {
+      res.status(400).json({ error: 'hfUrl host not allowed (huggingface.co, hf-mirror.com, civitai.com only)' });
+      return;
+    }
+    // Resolve filename. HF URLs encode it in the last path segment; civitai
+    // `/api/download/models/:versionId` does NOT — caller must supply it
+    // explicitly. We accept either an explicit `filename` or derive from HF.
+    let resolvedFilename = filename;
+    if (!resolvedFilename && hfUrl) {
+      try {
+        const host = new URL(hfUrl).hostname.toLowerCase();
+        if (host !== 'civitai.com' && host !== 'www.civitai.com') {
+          resolvedFilename = hfUrl.split('/').pop();
+        }
+      } catch { /* bubble up below */ }
+    }
     const id = { modelName, filename: resolvedFilename };
     const existing = findByIdentity(id);
     if (existing) { res.json({ success: true, taskId: existing.taskId, alreadyActive: true }); return; }
     const queued = findQueuedByIdentity(id);
     if (queued) { res.json({ success: true, taskId: queued.synthId, queued: true }); return; }
     if (isAtCapacity() && hfUrl && modelDir) {
+      // Even when queued, populate the catalog row so the UI shows the
+      // pending entry instead of nothing.
+      if (resolvedFilename) prepopulateCatalog(resolvedFilename, modelDir, hfUrl, meta, modelName);
       const synthId = enqueueDownload({ hfUrl, modelDir, ...id });
       res.json({ success: true, taskId: synthId, queued: true });
       return;
     }
     if (!hfUrl || !modelDir) { res.status(400).json({ error: 'hfUrl and modelDir required' }); return; }
-    const token = hfToken || settings.getHfToken();
-    const out = await models.downloadCustom(hfUrl, modelDir, token);
+    // Populate BEFORE kicking off the download so the Models page shows the
+    // row immediately on the next poll/refresh.
+    if (resolvedFilename) prepopulateCatalog(resolvedFilename, modelDir, hfUrl, meta, modelName);
+
+    const tokens = {
+      hfToken: hfToken || settings.getHfToken(),
+      civitaiToken: civitaiToken || settings.getCivitaiToken(),
+    };
+    const out = await models.downloadCustom(hfUrl, modelDir, tokens, resolvedFilename);
     trackDownload(out.taskId, { modelName: out.fileName, filename: out.fileName });
     res.json({ success: true, taskId: out.taskId, message: `Starting download: ${out.fileName} -> ${out.saveDir}` });
   } catch (err) { sendError(res, err, 500, 'Download failed'); }

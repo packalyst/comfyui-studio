@@ -10,12 +10,15 @@ import { paths } from '../config/paths.js';
 import { formatBytes } from '../lib/format.js';
 import { getHfAuthHeaders } from '../lib/http.js';
 import { statModelOnDisk } from '../lib/fs.js';
-import { load, persist, persistCurrent, seedFromComfyUI } from './catalogStore.js';
+import {
+  load, persist, persistCurrent, seedFromComfyUI,
+  markInstalled, markDownloadFailed,
+} from './catalogStore.js';
 import { fetchLauncherScan, type LauncherScanEntry } from './catalog.scan.js';
 import type { CatalogModel, MergedModel, FileStatus } from '../contracts/catalog.contract.js';
 
 export type { CatalogModel, MergedModel, FileStatus };
-export { seedFromComfyUI };
+export { seedFromComfyUI, markInstalled, markDownloadFailed };
 
 /** Size refresh cadence — re-HEAD entries this old on next access. */
 const SIZE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
@@ -55,14 +58,30 @@ function mergeMissingInto(existing: CatalogModel, entry: Partial<CatalogModel>):
   if (!existing.url && entry.url) existing.url = entry.url;
   if (!existing.name && entry.name) existing.name = entry.name;
   if (!existing.type && entry.type) existing.type = entry.type;
-  // save_path: templates are authoritative for their workflow's expected path,
-  // so let them overwrite the seed-time value. Non-template upserts still respect existing.
-  if (entry.save_path && (entry.source?.startsWith('template:') || !existing.save_path)) {
+  // save_path: templates + user-initiated downloads are authoritative for their
+  // expected path, so let them overwrite the seed-time value. Seed-source
+  // upserts still respect an existing save_path.
+  if (
+    entry.save_path
+    && (entry.source?.startsWith('template:') || entry.source === 'user' || !existing.save_path)
+  ) {
     existing.save_path = entry.save_path;
   }
   if (!existing.description && entry.description) existing.description = entry.description;
   if (!existing.reference && entry.reference) existing.reference = entry.reference;
   if (!existing.base && entry.base) existing.base = entry.base;
+  // Download-time metadata: thumbnail + downloading flag + error are
+  // overwritten when explicitly supplied (a fresh Download click must be
+  // able to clear a stale error and restart the spinner).
+  if (entry.thumbnail !== undefined) existing.thumbnail = entry.thumbnail;
+  if (entry.downloading !== undefined) existing.downloading = entry.downloading;
+  if (entry.error !== undefined) existing.error = entry.error;
+  // Pre-populated size: if upsert supplied size_bytes and we don't have one yet,
+  // adopt it so the row can show a size immediately (refreshSize later overwrites).
+  if ((!existing.size_bytes || existing.size_bytes === 0) && entry.size_bytes) {
+    existing.size_bytes = entry.size_bytes;
+    if (entry.size_pretty) existing.size_pretty = entry.size_pretty;
+  }
 }
 
 export function isSizeStale(model: CatalogModel): boolean {

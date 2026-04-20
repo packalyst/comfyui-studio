@@ -15,6 +15,7 @@ instead of `process.env.*`.
 | `STUDIO_CATALOG_FILE`           | `~/.config/comfyui-studio/catalog.json`                    | `src/services/catalog.ts`                             | Path to the persisted model catalog |
 | `STUDIO_CONFIG_FILE`            | `~/.config/comfyui-studio/config.json`                     | `src/services/settings.ts`                            | Path to persisted user settings (api key, hf token) |
 | `STUDIO_EXPOSED_WIDGETS_DIR`    | `~/.config/comfyui-studio/exposed_widgets`                 | `src/services/exposedWidgets.ts`                      | Directory of per-template exposed-widget records |
+| `STUDIO_SQLITE_PATH`            | `~/.config/comfyui-studio/runtime/studio.db`               | `src/lib/db/connection.ts`                            | Single sqlite DB file backing gallery + plugin catalog queries |
 | `NODE_ENV`                      | `development`                                              | (new) `src/middleware/errors.ts`                      | Used by error middleware to gate stack-trace leaks |
 
 Any NEW env access must be added both to the table above and to the typed

@@ -14,6 +14,8 @@ import {
 import { api } from '../services/comfyui';
 import { useApp } from '../context/AppContext';
 import { formatBytes, formatRelativeTime } from '../lib/utils';
+import { usePaginated } from '../hooks/usePaginated';
+import Pagination from './Pagination';
 import {
   AlertDialog,
   AlertDialogContent,
@@ -59,11 +61,11 @@ function displayName(entry: DownloadHistoryEntry): string {
 function extractHistory(raw: unknown): DownloadHistoryEntry[] {
   if (!raw) return [];
   const r = raw as Record<string, unknown>;
-  // Shape: { code, message, data: [...] }
+  // Shape: { items, page, pageSize, total, hasMore } (Phase 8 PageEnvelope)
+  if (Array.isArray(r.items)) return r.items as DownloadHistoryEntry[];
+  // Legacy shapes kept for back-compat with any lingering callers.
   if (Array.isArray(r.data)) return r.data as DownloadHistoryEntry[];
-  // Shape: { success, count, history: [...] }
   if (Array.isArray(r.history)) return r.history as DownloadHistoryEntry[];
-  // Shape: { data: { history: [...] } }
   if (r.data && typeof r.data === 'object') {
     const d = r.data as Record<string, unknown>;
     if (Array.isArray(d.history)) return d.history as DownloadHistoryEntry[];
@@ -83,7 +85,7 @@ function StatusBadge({ status }: { status: DownloadStatus }) {
   }
   if (status === 'downloading') {
     return (
-      <span className="badge-pill bg-teal-50 text-teal-700 ring-teal-200">
+      <span className="badge-pill badge-teal">
         <Loader2 className="h-3 w-3 animate-spin" />
         Downloading
       </span>
@@ -99,7 +101,7 @@ function StatusBadge({ status }: { status: DownloadStatus }) {
   }
   if (status === 'failed') {
     return (
-      <span className="badge-pill bg-rose-50 text-rose-700 ring-rose-200">
+      <span className="badge-pill badge-rose">
         <XCircle className="h-3 w-3" />
         Failed
       </span>
@@ -146,9 +148,9 @@ function ProgressCell({ downloaded, total, progress }: {
           </span>
         ) : null}
       </div>
-      <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+      <div className="progress-track">
         <div
-          className="h-full bg-teal-500 rounded-full transition-all duration-300"
+          className="progress-bar-fill"
           style={{ width: `${pct}%` }}
         />
       </div>
@@ -158,36 +160,30 @@ function ProgressCell({ downloaded, total, progress }: {
 
 export default function DownloadsTab() {
   const { downloads } = useApp();
-  const [entries, setEntries] = useState<DownloadHistoryEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DownloadHistoryEntry | null>(null);
   const [clearOpen, setClearOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const pollRef = useRef<number | null>(null);
 
-  const fetchHistory = useCallback(async (isInitial: boolean) => {
-    if (isInitial) setLoading(true);
-    else setRefreshing(true);
-    try {
-      const raw = await api.getDownloadHistory();
+  const fetcher = useCallback(
+    async ({ page, pageSize }: { page: number; pageSize: number }) => {
+      const raw = await api.getDownloadHistoryPaged(page, pageSize);
+      // The paginated envelope carries items[] at top level; back-compat
+      // extractor still runs so shape changes stay resilient.
       const list = extractHistory(raw);
       list.sort((a, b) => (b.endTime ?? b.startTime ?? 0) - (a.endTime ?? a.startTime ?? 0));
-      setEntries(list);
-      setError(null);
-    } catch (err) {
-      console.error('Failed to load download history:', err);
-      setError('Could not load download history');
-    } finally {
-      if (isInitial) setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
+      return { items: list, total: raw.total ?? list.length, hasMore: raw.hasMore ?? false };
+    },
+    [],
+  );
+
+  const paged = usePaginated<DownloadHistoryEntry>(fetcher, { initialPageSize: 25 });
+  const { items: entries, loading, refetch } = paged;
 
   useEffect(() => {
-    fetchHistory(true);
-  }, [fetchHistory]);
+    if (paged.error) setError(paged.error);
+  }, [paged.error]);
 
   // Merge live WS downloads into the displayed rows (by taskId). During an active
   // download the progress bar updates in real time without polling.
@@ -207,38 +203,24 @@ export default function DownloadsTab() {
     });
   }, [entries, downloads]);
 
-  const hasActive = useMemo(() => {
-    if (Object.values(downloads).some(d => d.status === 'downloading' && !d.completed)) return true;
-    return displayEntries.some(e => e.status === 'downloading');
-  }, [downloads, displayEntries]);
-
-  // Auto-refresh every 5s only while something is downloading.
+  // Event-driven refresh (no polling): when the WS download-map gains a
+  // taskId we've never seen on a history row, re-fetch the list once so the
+  // new download shows up. In-row progress updates come through the
+  // `displayEntries` merge above; terminal state flips come through the same
+  // WS message (`completed`/`error`), so polling every 5s is redundant.
   useEffect(() => {
-    if (!hasActive) {
-      if (pollRef.current !== null) {
-        window.clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-      return;
+    const knownTaskIds = new Set(entries.map(e => e.taskId || e.id));
+    for (const id of Object.keys(downloads)) {
+      if (!knownTaskIds.has(id)) { refetch(); return; }
     }
-    if (pollRef.current !== null) return;
-    pollRef.current = window.setInterval(() => {
-      fetchHistory(false);
-    }, 5000);
-    return () => {
-      if (pollRef.current !== null) {
-        window.clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-    };
-  }, [hasActive, fetchHistory]);
+  }, [downloads, entries, refetch]);
 
   const handleDelete = useCallback(async () => {
     if (!deleteTarget) return;
     setBusy(true);
     try {
       await api.deleteDownloadHistoryEntry(deleteTarget.id);
-      await fetchHistory(false);
+      await refetch();
     } catch (err) {
       console.error('Failed to delete history entry:', err);
       setError('Could not delete entry');
@@ -246,13 +228,13 @@ export default function DownloadsTab() {
       setBusy(false);
       setDeleteTarget(null);
     }
-  }, [deleteTarget, fetchHistory]);
+  }, [deleteTarget, refetch]);
 
   const handleClearAll = useCallback(async () => {
     setBusy(true);
     try {
       await api.clearDownloadHistory();
-      await fetchHistory(false);
+      await refetch();
     } catch (err) {
       console.error('Failed to clear history:', err);
       setError('Could not clear history');
@@ -260,13 +242,13 @@ export default function DownloadsTab() {
       setBusy(false);
       setClearOpen(false);
     }
-  }, [fetchHistory]);
+  }, [refetch]);
 
-  const total = displayEntries.length;
+  const total = paged.total;
 
   return (
     <section className="panel">
-      <div className="panel-header flex items-start justify-between gap-3">
+      <div className="panel-header-row">
         <div className="flex items-start gap-2">
           <History className="w-3.5 h-3.5 text-slate-400 mt-0.5" />
           <div>
@@ -293,13 +275,13 @@ export default function DownloadsTab() {
             </button>
           )}
           <button
-            onClick={() => fetchHistory(false)}
+            onClick={() => refetch()}
             className="btn-icon"
             title="Refresh"
             aria-label="Refresh"
-            disabled={refreshing || loading}
+            disabled={loading}
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${refreshing || loading ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </div>
@@ -314,7 +296,7 @@ export default function DownloadsTab() {
           </div>
         )}
 
-        {loading ? (
+        {loading && displayEntries.length === 0 ? (
           <div className="space-y-2">
             {[1, 2, 3].map(i => (
               <div key={i} className="h-12 rounded-lg bg-slate-100 animate-pulse" />
@@ -425,6 +407,15 @@ export default function DownloadsTab() {
           </>
         )}
       </div>
+
+      <Pagination
+        page={paged.page}
+        pageSize={paged.pageSize}
+        total={paged.total}
+        hasMore={paged.hasMore}
+        onPageChange={paged.setPage}
+        onPageSizeChange={paged.setPageSize}
+      />
 
       {/* Delete single entry confirm */}
       <AlertDialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>

@@ -11,7 +11,7 @@
 // Reads (`GET /network-config`, `GET /network-status`, log fetch) are
 // uncapped because they are polled by the settings UI.
 
-import { Router, type Request, type Response, type RequestHandler } from 'express';
+import { Router, type Request, type RequestHandler } from 'express';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { sendError } from '../middleware/errors.js';
 import * as system from '../services/systemLauncher/system.service.js';

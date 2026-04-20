@@ -42,6 +42,11 @@
   .panel-footer-note {
     @apply text-xs text-slate-500;
   }
+  /* Panel header with a right-aligned action / affordance strip.
+     Canonicalizes the repeated `panel-header flex items-start justify-between gap-3` combo. */
+  .panel-header-row {
+    @apply panel-header flex items-start justify-between gap-3;
+  }
 
   /* ===== Buttons ===== */
   .btn {
@@ -112,6 +117,53 @@
   }
   .badge-slate {
     @apply bg-slate-100 text-slate-700 ring-slate-200;
+  }
+  .badge-rose {
+    @apply bg-rose-50 text-rose-700 ring-rose-200;
+  }
+  .badge-teal {
+    @apply bg-teal-50 text-teal-700 ring-teal-200;
+  }
+
+  /* ===== Stat boxes (sidebar summary tiles — base + typography) =====
+     The container color comes from a trailing inline `bg-X-50 ring-X-100` so
+     each tile can still paint its own accent. */
+  .stat-box {
+    @apply rounded-md px-3 py-2 ring-1 ring-inset;
+  }
+  .stat-box-label {
+    @apply text-[10px] font-medium uppercase tracking-wide;
+  }
+  .stat-box-value {
+    @apply text-lg font-bold leading-tight mt-0.5;
+  }
+
+  /* Small uppercase label used for widget/stat section titles
+     (Dashboard cards, NetworkWidget, Plugins sidebar group). */
+  .stat-label {
+    @apply text-[10px] font-semibold uppercase tracking-wide text-slate-500;
+  }
+
+  /* ===== Progress bars ===== */
+  /* Outer track — used inside Downloads/Models rows and the Dashboard GPU VRAM
+     meter. Inner fill element (`.progress-bar-fill`) may carry its own color
+     override when the state isn't the default teal. */
+  .progress-track {
+    @apply h-1.5 bg-slate-100 rounded-full overflow-hidden;
+  }
+  .progress-bar-fill {
+    @apply h-full bg-teal-500 rounded-full transition-all duration-300;
+  }
+
+  /* ===== Modals =====
+     Common outer wrapper that centers a dialog in the viewport. */
+  .modal-overlay {
+    @apply fixed inset-0 z-50 flex items-center justify-center p-4;
+  }
+  /* Dimmed backdrop rendered inside a modal wrapper (positioned absolutely).
+     Add `animate-in fade-in-0` inline where the call-site wants the animation. */
+  .modal-backdrop {
+    @apply absolute inset-0 bg-black/50;
   }
 
   /* ===== Form fields ===== */

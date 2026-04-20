@@ -57,7 +57,13 @@ function isPathSafe(requested: string): boolean {
   // We constrain to configured roots only: the studio data dir plus the
   // models/plugins roots that paths.ts exposes. A missing root simply
   // disables that check branch — we never widen the allow-list.
-  const roots = [paths.configRoot, paths.dataDir, env.COMFYUI_PATH, env.MODELS_DIR].filter(Boolean);
+  const roots = [
+    paths.configRoot,
+    paths.runtimeStateDir,
+    paths.dataDir,
+    env.COMFYUI_PATH,
+    env.MODELS_DIR,
+  ].filter(Boolean);
   for (const root of roots) {
     try {
       safeResolve(root, requested);

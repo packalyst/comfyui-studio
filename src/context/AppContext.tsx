@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import React, { createContext, useContext, useEffect, useCallback, useMemo } from 'react';
 import type {
   Template,
   SystemStats,
@@ -6,14 +6,22 @@ import type {
   GalleryItem,
   AppSettings,
   GenerationJob,
-  ProgressUpdate,
   LauncherStatus,
   MonitorStats,
   DownloadState,
 } from '../types';
 import { api } from '../services/comfyui';
+import { SystemProvider, useSystem } from './SystemContext';
+import { CatalogProvider, useCatalog } from './CatalogContext';
+import { JobsProvider, useJobs } from './JobsContext';
+import { SettingsProvider, useSettings } from './SettingsContext';
 
-interface AppState {
+export { useSystem } from './SystemContext';
+export { useCatalog } from './CatalogContext';
+export { useJobs } from './JobsContext';
+export { useSettings } from './SettingsContext';
+
+interface AppContextType {
   templates: Template[];
   systemStats: SystemStats | null;
   monitorStats: MonitorStats | null;
@@ -28,187 +36,112 @@ interface AppState {
   launcherStatus: LauncherStatus | null;
   apiKeyConfigured: boolean;
   hfTokenConfigured: boolean;
+  civitaiTokenConfigured: boolean;
   downloads: Record<string, DownloadState>;
-}
-
-interface AppContextType extends AppState {
   refreshTemplates: () => Promise<void>;
   refreshSystem: () => Promise<void>;
-  refreshQueue: () => Promise<void>;
   refreshGallery: () => Promise<void>;
-  refreshApiKeyStatus: () => Promise<void>;
-  refreshHfTokenStatus: () => Promise<void>;
   updateSettings: (settings: Partial<AppSettings>) => void;
-  submitGeneration: (templateName: string, inputs: Record<string, unknown>, advancedSettings?: Record<string, { proxyIndex: number; value: unknown }>) => Promise<void>;
-  setCurrentJob: (job: GenerationJob | null) => void;
+  submitGeneration: (
+    templateName: string,
+    inputs: Record<string, unknown>,
+    advancedSettings?: Record<string, { proxyIndex: number; value: unknown }>,
+  ) => Promise<void>;
+  setCurrentJob: React.Dispatch<React.SetStateAction<GenerationJob | null>>;
 }
-
-const defaultSettings: AppSettings = {
-  comfyuiUrl: 'http://localhost:8188',
-  gpuUnloadTimeout: 300,
-  defaultSteps: 20,
-  defaultCfgScale: 7.0,
-  defaultWidth: 1024,
-  defaultHeight: 1024,
-  galleryPath: '/output',
-};
 
 const AppContext = createContext<AppContextType | null>(null);
 
-export function AppProvider({ children }: { children: React.ReactNode }) {
-  const [templates, setTemplates] = useState<Template[]>([]);
-  const [systemStats, setSystemStats] = useState<SystemStats | null>(null);
-  const [queueStatus, setQueueStatus] = useState<QueueStatus>({ queue_running: 0, queue_pending: 0 });
-  const [gallery, setGallery] = useState<GalleryItem[]>([]);
-  const [galleryTotal, setGalleryTotal] = useState<number>(0);
-  const [recentGallery, setRecentGallery] = useState<GalleryItem[]>([]);
-  const [settings, setSettings] = useState<AppSettings>(() => {
-    const saved = localStorage.getItem('comfyui-studio-settings');
-    return saved ? { ...defaultSettings, ...JSON.parse(saved) } : defaultSettings;
-  });
-  const [currentJob, setCurrentJob] = useState<GenerationJob | null>(null);
-  const [connected, setConnected] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [launcherStatus, setLauncherStatus] = useState<LauncherStatus | null>(null);
-  const [monitorStats, setMonitorStats] = useState<MonitorStats | null>(null);
-  const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
-  const [hfTokenConfigured, setHfTokenConfigured] = useState(false);
-  const [downloads, setDownloads] = useState<Record<string, DownloadState>>({});
-  const systemStatsRef = useRef<SystemStats | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
+/**
+ * WsAndFacadeProvider — mounted inside all four slice providers.
+ *
+ * Owns:
+ *  - the single WebSocket connection
+ *  - the unified `refreshSystem` (which hits /api/system and fans the payload
+ *    out across System + Catalog + Jobs slices)
+ *  - the façade value returned by `useApp()`
+ */
+function WsAndFacadeProvider({ children }: { children: React.ReactNode }) {
+  const system = useSystem();
+  const catalog = useCatalog();
+  const jobs = useJobs();
+  const settings = useSettings();
 
-  const refreshTemplates = useCallback(async () => {
-    try {
-      const data = await api.getTemplates();
-      setTemplates(data);
-    } catch {
-      // Keep existing templates if any are cached; don't clear on failure
-    }
-  }, []);
+  const {
+    _setConnected,
+    _setMonitorStats,
+    _setSystemStats,
+    _setLauncherStatus,
+    _setApiKeyConfigured,
+    _setHfTokenConfigured,
+    _setCivitaiTokenConfigured,
+    _systemStatsRef,
+  } = system;
+  const { _setGalleryTotal, _setRecentGallery } = catalog;
+  const {
+    _setQueueStatus,
+    _setDownloads,
+    _activePromptIdRef,
+    _fetchOutputFromHistory,
+    setCurrentJob,
+  } = jobs;
 
+  // Unified system refresh — populates System, Catalog (gallery), and Jobs (queue) slices.
   const refreshSystem = useCallback(async () => {
     try {
       const data = await api.getSystemStats();
-      const { queue, gallery: galleryInfo, ...stats } = data;
-      setSystemStats(stats);
-      systemStatsRef.current = stats;
-      if (queue) setQueueStatus(queue);
+      const {
+        queue, gallery: galleryInfo,
+        apiKeyConfigured, hfTokenConfigured, civitaiTokenConfigured,
+        ...stats
+      } = data;
+      _setSystemStats(stats);
+      _systemStatsRef.current = stats;
+      if (queue) _setQueueStatus(queue);
       if (galleryInfo) {
-        setGalleryTotal(galleryInfo.total);
-        setRecentGallery(galleryInfo.recent);
+        _setGalleryTotal(galleryInfo.total);
+        _setRecentGallery(galleryInfo.recent);
       }
-      setConnected(true);
+      if (typeof apiKeyConfigured === 'boolean') _setApiKeyConfigured(apiKeyConfigured);
+      if (typeof hfTokenConfigured === 'boolean') _setHfTokenConfigured(hfTokenConfigured);
+      if (typeof civitaiTokenConfigured === 'boolean') _setCivitaiTokenConfigured(civitaiTokenConfigured);
+      _setConnected(true);
     } catch (err) {
       console.error('Failed to fetch system stats:', err);
     }
-  }, []);
+  }, [
+    _setSystemStats,
+    _systemStatsRef,
+    _setQueueStatus,
+    _setGalleryTotal,
+    _setRecentGallery,
+    _setApiKeyConfigured,
+    _setHfTokenConfigured,
+    _setCivitaiTokenConfigured,
+    _setConnected,
+  ]);
 
-  const refreshQueue = useCallback(async () => {
-    try {
-      const data = await api.getQueue();
-      setQueueStatus(data);
-    } catch {
-      // Silently fail — connection status is tracked by refreshSystem
-    }
-  }, []);
-
-  const refreshGallery = useCallback(async () => {
-    try {
-      const data = await api.getGallery();
-      setGallery(data);
-    } catch {
-      // Keep existing gallery data on failure
-    }
-  }, []);
-
-  const refreshApiKeyStatus = useCallback(async () => {
-    try {
-      const status = await api.getApiKeyStatus();
-      setApiKeyConfigured(status.configured);
-    } catch {
-      setApiKeyConfigured(false);
-    }
-  }, []);
-
-  const refreshHfTokenStatus = useCallback(async () => {
-    try {
-      const status = await api.getHfTokenStatus();
-      setHfTokenConfigured(status.configured);
-    } catch {
-      setHfTokenConfigured(false);
-    }
-  }, []);
-
-  const updateSettings = useCallback((partial: Partial<AppSettings>) => {
-    setSettings(prev => {
-      const next = { ...prev, ...partial };
-      localStorage.setItem('comfyui-studio-settings', JSON.stringify(next));
-      return next;
-    });
-  }, []);
-
-  // Track active prompt ID in a ref so WS callbacks always have the latest value
-  const activePromptIdRef = useRef<string | null>(null);
-  const outputFetchedRef = useRef(false);
-  const outputFetchInFlightRef = useRef(false);
-
-  const fetchOutputFromHistory = useCallback((promptId: string) => {
-    // Skip if already resolved or a fetch is already racing for this prompt.
-    // (Multiple WS events fire for one completion — without this we'd issue 4+ parallel /api/history calls.)
-    if (outputFetchedRef.current || outputFetchInFlightRef.current) return;
-    outputFetchInFlightRef.current = true;
-    fetch(`/api/history/${promptId}`)
-      .then(r => r.json())
-      .then(data => {
-        if (data.outputs?.length > 0 && !outputFetchedRef.current) {
-          outputFetchedRef.current = true;
-          const out = data.outputs[0];
-          const url = `/api/view?filename=${encodeURIComponent(out.filename)}&subfolder=${encodeURIComponent(out.subfolder || '')}&type=${encodeURIComponent(out.type || 'output')}`;
-          setCurrentJob(p => {
-            if (!p) return p;
-            return { ...p, status: 'completed', progress: 100, outputUrl: url, outputMediaType: out.mediaType, completedAt: new Date().toISOString() };
-          });
-          // Gallery & queue updates arrive via the backend's WS broadcasts; no REST refresh needed.
-        }
-      })
-      .catch(() => {})
-      .finally(() => { outputFetchInFlightRef.current = false; });
-  }, []);
-
-  const submitGeneration = useCallback(async (templateName: string, inputs: Record<string, unknown>, advancedSettings?: Record<string, { proxyIndex: number; value: unknown }>) => {
-    outputFetchedRef.current = false;
-    const job: GenerationJob = {
-      id: crypto.randomUUID(),
-      templateName,
-      status: 'pending',
-      progress: 0,
-      inputs,
-      createdAt: new Date().toISOString(),
-    };
-    setCurrentJob(job);
-    try {
-      const result = await api.generate(templateName, inputs, advancedSettings);
-      const promptId = result.prompt_id || job.id;
-      activePromptIdRef.current = promptId;
-      setCurrentJob(prev => prev ? { ...prev, status: 'running', id: promptId } : null);
-    } catch (err) {
-      setCurrentJob(prev => prev ? { ...prev, status: 'failed' } : null);
-      console.error('Generation failed:', err);
-    }
-  }, []);
-
-  // WebSocket connection for progress
+  // Kick off the initial system fetch; individual slice providers already handle
+  // their own token-status fetches.
   useEffect(() => {
+    refreshSystem().finally(() => system._setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // WebSocket — owns routing of every WS message to the correct slice setter.
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let closed = false;
+
     const connectWs = () => {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-      wsRef.current = ws;
+      ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
       ws.onmessage = (event) => {
         if (typeof event.data !== 'string') return;
         try {
           const msg = JSON.parse(event.data);
-          const promptId = activePromptIdRef.current;
+          const promptId = _activePromptIdRef.current;
 
           if (msg.type === 'progress' && msg.data?.value !== undefined && msg.data?.max !== undefined) {
             const progress = (msg.data.value / msg.data.max) * 100;
@@ -217,52 +150,49 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               return { ...prev, status: 'running', progress };
             });
           } else if (msg.type === 'executing' && msg.data?.node === null) {
-            // node=null means execution finished for this prompt
             if (promptId) {
-              setTimeout(() => fetchOutputFromHistory(promptId), 500);
+              setTimeout(() => _fetchOutputFromHistory(promptId), 500);
             }
           } else if (msg.type === 'executed' && msg.data?.prompt_id === promptId) {
-            // Node executed — might have output
             if (promptId) {
-              setTimeout(() => fetchOutputFromHistory(promptId), 500);
+              setTimeout(() => _fetchOutputFromHistory(promptId), 500);
             }
           } else if (msg.type === 'progress_state') {
-            // All nodes report their state — check if all finished
             const nodes = msg.data?.nodes;
             if (nodes && promptId) {
               const allFinished = Object.values(nodes).every((n: unknown) => (n as Record<string, string>).state === 'finished');
               if (allFinished) {
-                setTimeout(() => fetchOutputFromHistory(promptId), 500);
+                setTimeout(() => _fetchOutputFromHistory(promptId), 500);
               }
             }
           } else if (msg.type === 'execution_complete') {
             if (promptId) {
-              setTimeout(() => fetchOutputFromHistory(promptId), 500);
+              setTimeout(() => _fetchOutputFromHistory(promptId), 500);
             }
           } else if (msg.type === 'error' || msg.type === 'execution_error' || msg.type === 'execution_interrupted') {
             const errMsg = (msg.data as { exception_message?: string })?.exception_message;
             setCurrentJob(prev => prev ? { ...prev, status: 'failed', error: errMsg } : null);
           } else if (msg.type === 'launcher-status') {
             const status = msg.data as LauncherStatus;
-            setLauncherStatus(status);
-            setConnected(status.running === true);
-            if (status.running && !systemStatsRef.current) {
+            _setLauncherStatus(status);
+            _setConnected(status.running === true);
+            if (status.running && !_systemStatsRef.current) {
               refreshSystem();
             }
           } else if (msg.type === 'queue') {
-            setQueueStatus(msg.data as QueueStatus);
+            _setQueueStatus(msg.data as QueueStatus);
           } else if (msg.type === 'gallery') {
             const data = msg.data as { total: number; recent: GalleryItem[] };
-            setGalleryTotal(data.total);
-            setRecentGallery(data.recent);
+            _setGalleryTotal(data.total);
+            _setRecentGallery(data.recent);
           } else if (msg.type === 'download') {
             const d = msg.data as DownloadState;
-            setDownloads(prev => {
+            _setDownloads(prev => {
               // Remove from map shortly after terminal state so completed/cancelled items don't linger.
               if (d.completed || d.status === 'completed' || d.status === 'error') {
                 // Keep the terminal state visible briefly so the UI can render "done" — purge after 3s.
                 setTimeout(() => {
-                  setDownloads(p => {
+                  _setDownloads(p => {
                     const { [d.taskId]: _removed, ...rest } = p;
                     return rest;
                   });
@@ -272,7 +202,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             });
           } else if (msg.type === 'downloads-snapshot') {
             const list = msg.data as DownloadState[];
-            setDownloads(Object.fromEntries(list.map(d => [d.taskId, d])));
+            _setDownloads(Object.fromEntries(list.map(d => [d.taskId, d])));
           } else if (msg.type === 'crystools.monitor') {
             const d = msg.data as {
               cpu_utilization?: number;
@@ -290,8 +220,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 vram_used?: number;
               }>;
             };
-            setConnected(true);
-            setMonitorStats({
+            _setConnected(true);
+            _setMonitorStats({
               cpu_utilization: d.cpu_utilization,
               ram_total: d.ram_total,
               ram_used: d.ram_used,
@@ -301,7 +231,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               hdd_used_percent: d.hdd_used_percent,
               device_type: d.device_type,
             });
-            setSystemStats(prev => {
+            _setSystemStats(prev => {
               if (!prev) return prev;
               const next = {
                 ...prev,
@@ -317,10 +247,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                   };
                 }),
               };
-              systemStatsRef.current = next;
+              _systemStatsRef.current = next;
               return next;
             });
-            if (!systemStatsRef.current) refreshSystem();
+            if (!_systemStatsRef.current) refreshSystem();
           }
         } catch {
           // ignore non-JSON messages
@@ -328,55 +258,97 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       };
 
       ws.onclose = () => {
+        if (closed) return;
         setTimeout(connectWs, 3000);
       };
     };
 
     connectWs();
     return () => {
-      wsRef.current?.close();
+      closed = true;
+      ws?.close();
     };
-  }, [refreshSystem, fetchOutputFromHistory]);
+  }, [
+    refreshSystem,
+    _fetchOutputFromHistory,
+    setCurrentJob,
+    _setLauncherStatus,
+    _setConnected,
+    _setQueueStatus,
+    _setGalleryTotal,
+    _setRecentGallery,
+    _setDownloads,
+    _setMonitorStats,
+    _setSystemStats,
+    _systemStatsRef,
+    _activePromptIdRef,
+  ]);
 
-  // Initial system info fetch (device name, pytorch/python versions).
-  // Live updates arrive via WS (crystools.monitor for stats, launcher-status for connectivity).
-  useEffect(() => {
-    refreshSystem().finally(() => setLoading(false));
-    refreshApiKeyStatus();
-    refreshHfTokenStatus();
-  }, [refreshSystem, refreshApiKeyStatus, refreshHfTokenStatus]);
+  const value = useMemo<AppContextType>(
+    () => ({
+      templates: catalog.templates,
+      systemStats: system.systemStats,
+      monitorStats: system.monitorStats,
+      queueStatus: jobs.queueStatus,
+      gallery: catalog.gallery,
+      galleryTotal: catalog.galleryTotal,
+      recentGallery: catalog.recentGallery,
+      settings: settings.settings,
+      currentJob: jobs.currentJob,
+      connected: system.connected,
+      loading: system.loading,
+      launcherStatus: system.launcherStatus,
+      apiKeyConfigured: system.apiKeyConfigured,
+      hfTokenConfigured: system.hfTokenConfigured,
+      civitaiTokenConfigured: system.civitaiTokenConfigured,
+      downloads: jobs.downloads,
+      refreshTemplates: catalog.refreshTemplates,
+      refreshSystem,
+      refreshGallery: catalog.refreshGallery,
+      updateSettings: settings.updateSettings,
+      submitGeneration: jobs.submitGeneration,
+      setCurrentJob: jobs.setCurrentJob,
+    }),
+    [
+      catalog.templates,
+      catalog.gallery,
+      catalog.galleryTotal,
+      catalog.recentGallery,
+      catalog.refreshTemplates,
+      catalog.refreshGallery,
+      system.systemStats,
+      system.monitorStats,
+      system.connected,
+      system.loading,
+      system.launcherStatus,
+      system.apiKeyConfigured,
+      system.hfTokenConfigured,
+      system.civitaiTokenConfigured,
+      jobs.queueStatus,
+      jobs.currentJob,
+      jobs.downloads,
+      jobs.submitGeneration,
+      jobs.setCurrentJob,
+      settings.settings,
+      settings.updateSettings,
+      refreshSystem,
+    ],
+  );
 
+  return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
+}
+
+export function AppProvider({ children }: { children: React.ReactNode }) {
   return (
-    <AppContext.Provider
-      value={{
-        templates,
-        systemStats,
-        queueStatus,
-        gallery,
-        settings,
-        currentJob,
-        connected,
-        loading,
-        launcherStatus,
-        monitorStats,
-        galleryTotal,
-        recentGallery,
-        apiKeyConfigured,
-        hfTokenConfigured,
-        downloads,
-        refreshApiKeyStatus,
-        refreshHfTokenStatus,
-        refreshTemplates,
-        refreshSystem,
-        refreshQueue,
-        refreshGallery,
-        updateSettings,
-        submitGeneration,
-        setCurrentJob,
-      }}
-    >
-      {children}
-    </AppContext.Provider>
+    <SettingsProvider>
+      <SystemProvider>
+        <CatalogProvider>
+          <JobsProvider>
+            <WsAndFacadeProvider>{children}</WsAndFacadeProvider>
+          </JobsProvider>
+        </CatalogProvider>
+      </SystemProvider>
+    </SettingsProvider>
   );
 }
 

@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useLayoutEffect } from 'react';
 import { Info, Upload, X, Minus, Plus } from 'lucide-react';
 import type { FormInput } from '../types';
-import Tooltip from './Tooltip';
+import { Tooltip, TooltipTrigger, TooltipContent } from './ui/tooltip';
 import { Slider } from './ui/slider';
 import { Switch } from './ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
@@ -47,8 +47,11 @@ function FieldLabel({ input, right, inline }: { input: FormInput; right?: React.
     <div className={`flex items-center gap-1.5 ${inline ? '' : 'mb-1.5'}`}>
       <label className="text-sm font-medium text-gray-700">{input.label}</label>
       {input.description && (
-        <Tooltip content={input.description}>
-          <Info className="w-3.5 h-3.5 text-gray-400 cursor-help" />
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Info className="w-3.5 h-3.5 text-gray-400 cursor-help" />
+          </TooltipTrigger>
+          <TooltipContent>{input.description}</TooltipContent>
         </Tooltip>
       )}
       {input.required && (

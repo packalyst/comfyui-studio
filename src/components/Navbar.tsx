@@ -1,8 +1,16 @@
 import { useState, useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Compass, Wand2, Image, Box, Settings, Wifi, WifiOff, Menu, X, Play, Loader2 } from 'lucide-react';
+import { LayoutDashboard, Compass, Wand2, Image, Box, Package, Settings, Wifi, WifiOff, Menu, X, Play, Loader2, ExternalLink } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { api } from '../services/comfyui';
+import ComfyUIActions from './ComfyUIActions';
+
+function editorHref(): string {
+  const { protocol, host } = window.location;
+  const parts = host.split('.');
+  if (parts.length <= 1) return `${protocol}//comfyuieditor`;
+  return `${protocol}//comfyuieditor.${parts.slice(1).join('.')}`;
+}
 
 const links = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -10,6 +18,7 @@ const links = [
   { to: '/studio', label: 'Studio', icon: Wand2 },
   { to: '/gallery', label: 'Gallery', icon: Image },
   { to: '/models', label: 'Models', icon: Box },
+  { to: '/plugins', label: 'Plugins', icon: Package },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 
@@ -43,10 +52,17 @@ export default function Navbar() {
     }
     if (connected) {
       return (
-        <div className="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-green-50 text-green-700 border border-green-200">
+        <a
+          href={editorHref()}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-green-50 text-green-700 border border-green-200 hover:bg-green-100 transition-colors"
+          title="Open ComfyUI editor in new tab"
+        >
           <Wifi className="w-3 h-3" />
           Connected
-        </div>
+          <ExternalLink className="w-3 h-3 opacity-60" />
+        </a>
       );
     }
     return (
@@ -92,8 +108,11 @@ export default function Navbar() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            {/* Desktop: status pill */}
-            <div className="hidden md:block">{statusPill}</div>
+            {/* Desktop: status pill + actions */}
+            <div className="hidden md:flex items-center gap-1.5">
+              {statusPill}
+              <ComfyUIActions />
+            </div>
             {/* Mobile: hamburger button */}
             <button
               onClick={() => setMenuOpen(o => !o)}

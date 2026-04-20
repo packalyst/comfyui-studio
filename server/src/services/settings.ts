@@ -7,6 +7,7 @@ const CONFIG_FILE = paths.configFile;
 interface Settings {
   apiKeyComfyOrg?: string;
   huggingFaceToken?: string;
+  civitaiToken?: string;
 }
 
 let cache: Settings | null = null;
@@ -69,5 +70,25 @@ export function setHfToken(token: string): void {
 export function clearHfToken(): void {
   const settings = load();
   const { huggingFaceToken: _removed, ...rest } = settings;
+  save(rest);
+}
+
+export function getCivitaiToken(): string | undefined {
+  return load().civitaiToken;
+}
+
+export function isCivitaiTokenConfigured(): boolean {
+  const token = getCivitaiToken();
+  return typeof token === 'string' && token.length > 0;
+}
+
+export function setCivitaiToken(token: string): void {
+  const settings = load();
+  save({ ...settings, civitaiToken: token });
+}
+
+export function clearCivitaiToken(): void {
+  const settings = load();
+  const { civitaiToken: _removed, ...rest } = settings;
   save(rest);
 }

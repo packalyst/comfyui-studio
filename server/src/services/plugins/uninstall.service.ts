@@ -5,6 +5,7 @@
 import { randomUUID } from 'crypto';
 import fs from 'fs';
 import { logger } from '../../lib/logger.js';
+import * as bus from '../../lib/events.js';
 import * as history from './history.service.js';
 import * as progress from './progress.service.js';
 import * as cache from './cache.service.js';
@@ -54,6 +55,7 @@ async function uninstallTask(taskId: string, pluginId: string): Promise<void> {
     succeed(taskId, `Uninstalled ${pluginId}`);
     cache.clearPluginCache(pluginId);
     cache.refreshInstalledPlugins();
+    bus.emit('plugin:removed', { pluginId });
     await triggerRestart(`plugin uninstall: ${pluginId}`);
   } catch (err) {
     fail(taskId, err instanceof Error ? err.message : String(err));
@@ -83,6 +85,7 @@ async function disableTask(taskId: string, pluginId: string): Promise<void> {
     await fs.promises.rename(enabled, disabled);
     succeed(taskId, `Disabled ${pluginId}`);
     cache.clearPluginCache(pluginId);
+    bus.emit('plugin:disabled', { pluginId });
   } catch (err) {
     fail(taskId, err instanceof Error ? err.message : String(err));
   }
@@ -110,6 +113,7 @@ async function enableTask(taskId: string, pluginId: string): Promise<void> {
     await fs.promises.rename(disabled, enabled);
     succeed(taskId, `Enabled ${pluginId}`);
     cache.clearPluginCache(pluginId);
+    bus.emit('plugin:enabled', { pluginId });
   } catch (err) {
     fail(taskId, err instanceof Error ? err.message : String(err));
   }

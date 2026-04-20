@@ -4,6 +4,7 @@
 
 import { Router, type Request, type Response } from 'express';
 import * as exposedWidgets from '../services/exposedWidgets.js';
+import * as templates from '../services/templates/index.js';
 import {
   buildRawWidgetSettings,
   enumerateTemplateWidgets,
@@ -16,6 +17,20 @@ import { sendError } from '../middleware/errors.js';
 import type { AdvancedSetting } from '../contracts/workflow.contract.js';
 
 const COMFYUI_URL = env.COMFYUI_URL;
+
+/**
+ * Load a workflow JSON by template name. User-imported templates live on our
+ * disk (ComfyUI doesn't know about them) so check locally first; fall back to
+ * ComfyUI's `/templates/:name.json` for upstream templates.
+ */
+async function loadWorkflowJson(templateName: string): Promise<Record<string, unknown> | null> {
+  if (templates.isUserWorkflow(templateName)) {
+    return templates.getUserWorkflowJson(templateName);
+  }
+  const wfRes = await fetch(`${COMFYUI_URL}/templates/${encodeURIComponent(templateName)}.json`);
+  if (!wfRes.ok) return null;
+  return await wfRes.json() as Record<string, unknown>;
+}
 
 const router = Router();
 
@@ -45,14 +60,11 @@ function findWrapperNode(workflow: Record<string, unknown>): WrapperMatch {
 router.get('/workflow-settings/:templateName', async (req: Request, res: Response) => {
   try {
     const templateName = req.params.templateName as string;
-    const wfRes = await fetch(
-      `${COMFYUI_URL}/templates/${encodeURIComponent(templateName)}.json`
-    );
-    if (!wfRes.ok) {
+    const workflow = await loadWorkflowJson(templateName);
+    if (!workflow) {
       res.status(404).json({ error: 'Workflow not found' });
       return;
     }
-    const workflow = await wfRes.json();
 
     // Proxy-widget path: only runs when the template has a wrapper node authored with proxyWidgets.
     // Raw-widget path (user-picked fields) runs regardless, so templates without a wrapper still
@@ -81,14 +93,11 @@ router.get('/workflow-settings/:templateName', async (req: Request, res: Respons
 router.get('/template-widgets/:templateName', async (req: Request, res: Response) => {
   try {
     const templateName = req.params.templateName as string;
-    const wfRes = await fetch(
-      `${COMFYUI_URL}/templates/${encodeURIComponent(templateName)}.json`
-    );
-    if (!wfRes.ok) {
+    const workflow = await loadWorkflowJson(templateName);
+    if (!workflow) {
       res.status(404).json({ error: 'Workflow not found' });
       return;
     }
-    const workflow = await wfRes.json();
     const widgets = await enumerateTemplateWidgets(workflow, templateName);
     res.json({ widgets });
   } catch (err) {

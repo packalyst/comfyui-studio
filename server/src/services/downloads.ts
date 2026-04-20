@@ -2,6 +2,7 @@ import { env } from '../config/env.js';
 import { matchesIdentity } from '../lib/identity.js';
 import { getTaskProgress, setProgressListener } from './downloadController/downloadController.service.js';
 import * as models from './models/models.service.js';
+import * as settings from './settings.js';
 import type { DownloadState, DownloadIdentity } from '../contracts/system.contract.js';
 
 export type { DownloadState, DownloadIdentity };
@@ -148,10 +149,14 @@ async function tryDequeue(): Promise<void> {
   const next = queue.shift();
   if (!next) return;
   try {
-    // Local `downloadCustom` accepts the HF token and wires `authHeaders` into
-    // the engine. The launcher's `hfToken` body-field plumbing is no longer
-    // needed since the download runs in-process.
-    const out = await models.downloadCustom(next.hfUrl, next.modelDir);
+    // Local `downloadCustom` accepts host-specific tokens and wires
+    // `authHeaders` into the engine. Tokens come from persisted settings; the
+    // queued request itself does not carry secrets.
+    const tokens = {
+      hfToken: settings.getHfToken(),
+      civitaiToken: settings.getCivitaiToken(),
+    };
+    const out = await models.downloadCustom(next.hfUrl, next.modelDir, tokens, next.filename);
     // Retire the synthetic placeholder; the real taskId's broadcasts take over from here.
     emit({
       type: 'download',

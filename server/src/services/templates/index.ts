@@ -7,4 +7,20 @@ export {
   loadTemplatesFromComfyUI,
   getTemplates,
   getTemplate,
+  getTemplateNames,
+  seedTemplatesOnce,
 } from './templates.service.js';
+export { extractDeps } from './depExtract.js';
+export type { ExtractedDeps } from './depExtract.js';
+export { refreshTemplates } from './refresh.js';
+export type { RefreshResult } from './refresh.js';
+export { isReady, recomputeReadinessFor } from './readiness.js';
+export {
+  saveUserWorkflow,
+  listUserWorkflows,
+  deleteUserWorkflow,
+  isUserWorkflow,
+  getUserWorkflowJson,
+  slugifyTemplateName,
+} from './userTemplates.js';
+export type { SaveWorkflowInput } from './userTemplates.js';

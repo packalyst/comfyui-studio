@@ -4,14 +4,23 @@ import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import apiRouter from './routes/index.js';
 import { getComfyUIUrl, getQueue, getGalleryItems } from './services/comfyui.js';
+import * as galleryService from './services/gallery.service.js';
 import { loadTemplatesFromComfyUI } from './services/templates/index.js';
+import { wireTemplateEventHandlers } from './services/templates/eventSubscribers.js';
+import { wireCatalogEventHandlers } from './services/catalog.events.js';
 import { setDownloadBroadcaster, getAllDownloads } from './services/downloads.js';
 import { getStatus as getLocalComfyUIStatus } from './services/comfyui/status.service.js';
 import { startComfyUIProxy } from './services/comfyui/proxy.service.js';
 import { env } from './config/env.js';
+import { migrateLegacyPaths } from './config/migrateLegacyPaths.js';
 import { requestLogger } from './middleware/logging.js';
 import { errorHandler } from './middleware/errors.js';
 import { logger } from './lib/logger.js';
+
+// Phase-6 path consolidation: move runtime-written JSON out of the bundled
+// data dir and into `~/.config/comfyui-studio/runtime/` so it survives image
+// rebuilds. No-op once migrated.
+migrateLegacyPaths();
 
 const app = express();
 const PORT = env.PORT;
@@ -117,6 +126,9 @@ function scheduleGalleryBroadcast() {
   galleryTimer = setTimeout(async () => {
     galleryTimer = null;
     try {
+      // Persist new generations to sqlite in the same path that drives the
+      // WS broadcast so the next /gallery fetch reads hot data.
+      await galleryService.onGenerationComplete();
       const items = await getGalleryItems();
       broadcast({ type: 'gallery', data: { total: items.length, recent: items.slice(0, 8) } });
     } catch { /* ignore */ }
@@ -185,6 +197,14 @@ async function start() {
   const comfyUrl = getComfyUIUrl();
   logger.info(`ComfyUI URL: ${comfyUrl}`);
 
+  // Subscribe the templates repo to model/plugin lifecycle events so the
+  // `installed` readiness flag stays in sync with disk state.
+  wireTemplateEventHandlers();
+  // Subscribe the catalog store to the same model-lifecycle events so
+  // pre-populated rows flip from `downloading: true` to installed/error as
+  // the download finishes.
+  wireCatalogEventHandlers();
+
   server.listen(PORT, () => {
     logger.info(`ComfyUI Studio server running on port ${PORT}`);
   });
@@ -200,10 +220,21 @@ async function start() {
 
   async function loadWithRetry(retries: number, delay: number) {
     await loadTemplatesFromComfyUI(comfyUrl);
-    const { getTemplates } = await import('./services/templates/index.js');
-    if (getTemplates().length === 0 && retries > 0) {
+    const tmpl = await import('./services/templates/index.js');
+    if (tmpl.getTemplates().length === 0 && retries > 0) {
       logger.info(`Templates not available, retrying in ${delay / 1000}s... (${retries} retries left)`);
       setTimeout(() => loadWithRetry(retries - 1, delay), delay);
+      return;
+    }
+    if (tmpl.getTemplates().length > 0) {
+      // Seed sqlite with the shorthand edges + kick off deep refresh in the
+      // background so real filenames populate without a manual click.
+      tmpl.seedTemplatesOnce();
+      tmpl.refreshTemplates().then(r => {
+        logger.info('auto template refresh complete', r);
+      }).catch(err => {
+        logger.warn('auto template refresh failed', { error: String(err) });
+      });
     }
   }
   loadWithRetry(12, 10000);

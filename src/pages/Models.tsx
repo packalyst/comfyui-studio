@@ -2,15 +2,18 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Box, Trash2, Loader2, Search, WifiOff, Settings,
-  Download, X, SlidersHorizontal, Lock, AlertTriangle, History,
+  Download, SlidersHorizontal, History,
 } from 'lucide-react';
-import type { LauncherModel, CatalogModel } from '../types';
+import type { CatalogModel } from '../types';
 import { findDownloadForModel } from '../types';
 import { api } from '../services/comfyui';
 import { useApp } from '../context/AppContext';
 import { usePersistedState } from '../hooks/usePersistedState';
+import { usePaginated } from '../hooks/usePaginated';
+import Pagination from '../components/Pagination';
 import PageSubbar from '../components/PageSubbar';
 import DownloadsTab from '../components/DownloadsTab';
+import ModelRow, { type ModelRowDownload } from '../components/ModelRow';
 import { formatBytes } from '../lib/utils';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Checkbox } from '../components/ui/checkbox';
@@ -26,17 +29,6 @@ import {
 } from '../components/ui/alert-dialog';
 
 type ModelsTab = 'models' | 'downloads';
-
-// Group models by type
-function groupByType(models: CatalogModel[]): Record<string, CatalogModel[]> {
-  const groups: Record<string, CatalogModel[]> = {};
-  for (const m of models) {
-    const type = m.type || 'other';
-    if (!groups[type]) groups[type] = [];
-    groups[type].push(m);
-  }
-  return groups;
-}
 
 const TYPE_LABELS: Record<string, string> = {
   checkpoints: 'Checkpoints',
@@ -75,48 +67,52 @@ export default function Models() {
     setTab(prev => (prev === fromUrl ? prev : fromUrl));
   }, [urlTab]);
 
-  const [models, setModels] = useState<CatalogModel[]>([]);
-  const [loading, setLoading] = useState(true);
   const [search, setSearch] = usePersistedState('models.search', '');
   const [selectedWorkflow, setSelectedWorkflow] = usePersistedState<string>('models.workflow', '');
   const [workflowRequired, setWorkflowRequired] = useState<Set<string>>(new Set());
   const [typeFilter, setTypeFilter] = usePersistedState<Set<string>>('models.types', new Set());
+  const [installedFilter, setInstalledFilter] = usePersistedState<'all' | 'yes' | 'no'>('models.installed', 'all');
   const [filtersOpen, setFiltersOpen] = usePersistedState('models.filtersOpen', false);
 
+  // Full catalog loaded once for stats + type-list + workflow dep filter. The
+  // displayed list is server-paginated below. Models.types is bounded (~50
+  // types max), so the overhead is acceptable.
+  const [allModels, setAllModels] = useState<CatalogModel[]>([]);
   const lastCompletedRef = useRef<Set<string>>(new Set());
 
-  // Watch for completed downloads → rescan + reload models list
+  const loadAllModels = useCallback(async () => {
+    try {
+      const data = await api.getModelsCatalog();
+      setAllModels(data);
+    } catch {
+      setAllModels([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadAllModels();
+    refreshTemplates();
+  }, [loadAllModels, refreshTemplates]);
+
+  // Watch for completed downloads → rescan + reload full catalog + current page.
+  // `refetchPage` is pulled from the `paged` memo below; set after it's defined.
+  const refetchPageRef = useRef<(() => Promise<void>) | null>(null);
   useEffect(() => {
     for (const [taskId, dl] of Object.entries(downloads)) {
       if ((dl.completed || dl.status === 'completed') && !lastCompletedRef.current.has(taskId)) {
         lastCompletedRef.current.add(taskId);
         (async () => {
           try { await api.scanModels(); } catch { /* ignore */ }
-          try {
-            const data = await api.getModelsCatalog();
-            setModels(data);
-          } catch { /* ignore */ }
+          await loadAllModels();
+          // Explicitly refetch the visible page once so newly-installed
+          // rows reflect their `installed` flag. Avoids the loopy
+          // `useEffect(() => refetchPage(), [allModels])` that fired on
+          // every mount + catalog change.
+          await refetchPageRef.current?.();
         })();
       }
     }
-  }, [downloads]);
-
-  // Load models from launcher
-  const loadModels = useCallback(async () => {
-    try {
-      const data = await api.getModelsCatalog();
-      setModels(data);
-    } catch {
-      setModels([]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadModels();
-    refreshTemplates();
-  }, [loadModels, refreshTemplates]);
+  }, [downloads, loadAllModels]);
 
   // When workflow filter changes, check dependencies
   useEffect(() => {
@@ -131,6 +127,28 @@ export default function Models() {
       })
       .catch(() => setWorkflowRequired(new Set()));
   }, [selectedWorkflow]);
+
+  // Server-paginated fetch for the visible list. Filters are forwarded so
+  // pagination lines up across pages.
+  const types = useMemo(() => Array.from(typeFilter), [typeFilter]);
+  const installedParam: boolean | null = installedFilter === 'yes' ? true : installedFilter === 'no' ? false : null;
+  const fetcher = useCallback(
+    async ({ page, pageSize }: { page: number; pageSize: number }) => {
+      const res = await api.getModelsCatalogPaged(page, pageSize, {
+        q: search.trim() || undefined,
+        types: types.length > 0 ? types : undefined,
+        installed: installedParam,
+      });
+      return { items: res.items, total: res.total, hasMore: res.hasMore };
+    },
+    [search, types, installedParam],
+  );
+  const paged = usePaginated<CatalogModel>(fetcher, { deps: [search, types, installedParam] });
+  const { items: models, loading, refetch: refetchPage } = paged;
+
+  // Expose refetchPage to the download-completion watcher without creating a
+  // dep cycle (the watcher was declared above loadAllModels / paged).
+  useEffect(() => { refetchPageRef.current = refetchPage; }, [refetchPage]);
 
   const handleInstall = useCallback(async (model: CatalogModel) => {
     try {
@@ -185,13 +203,13 @@ export default function Models() {
     try {
       await api.deleteModel({ modelName: deleteTarget.name });
       try { await api.scanModels(); } catch { /* ignore */ }
-      loadModels();
+      loadAllModels();
     } catch (err) {
       console.error('Failed to delete model:', err);
     } finally {
       setDeleteTarget(null);
     }
-  }, [deleteTarget, loadModels]);
+  }, [deleteTarget, loadAllModels]);
 
   const handleCancelDownload = useCallback(async (_modelName: string, downloadId: string) => {
     try {
@@ -201,52 +219,38 @@ export default function Models() {
     }
   }, []);
 
-  // Unique types from all models
+  // Unique types from the FULL catalog (not just current page) so the sidebar
+  // Types checklist is stable.
   const uniqueTypes = useMemo(() => {
-    const types = new Set<string>();
-    for (const m of models) {
-      types.add(m.type || 'other');
-    }
-    return Array.from(types).sort();
-  }, [models]);
+    const t = new Set<string>();
+    for (const m of allModels) t.add(m.type || 'other');
+    return Array.from(t).sort();
+  }, [allModels]);
 
-  // Filter models
+  // When a template is selected, the required-model list is typically small
+  // (<30 entries) and must not be hidden by pagination. Source from the full
+  // catalog + filter client-side in that case; otherwise use the paginated
+  // page.
   const filteredModels = useMemo(() => {
-    let filtered = models;
-
-    // Filter by workflow if selected
     if (selectedWorkflow && workflowRequired.size > 0) {
-      filtered = filtered.filter(m =>
-        workflowRequired.has(m.filename) || workflowRequired.has(m.name)
+      return allModels.filter(m =>
+        workflowRequired.has(m.filename) || workflowRequired.has(m.name),
       );
     }
-
-    // Type filter
-    if (typeFilter.size > 0) {
-      filtered = filtered.filter(m => typeFilter.has(m.type || 'other'));
-    }
-
-    // Search filter
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      filtered = filtered.filter(m =>
-        m.name.toLowerCase().includes(q) ||
-        m.filename?.toLowerCase().includes(q) ||
-        m.type?.toLowerCase().includes(q)
-      );
-    }
-
-    return filtered;
-  }, [models, selectedWorkflow, workflowRequired, search, typeFilter]);
-
-  const grouped = useMemo(() => groupByType(filteredModels), [filteredModels]);
+    return models;
+  }, [models, allModels, selectedWorkflow, workflowRequired]);
 
   const handleDownloadAllMissing = useCallback(async () => {
-    const missingModels = filteredModels.filter(m => !m.installed);
-    for (const model of missingModels) {
+    // Pull from the full catalog (not just this page) so the action truly
+    // covers every missing model required by the selected workflow.
+    const requiredNow = workflowRequired;
+    const missing = allModels.filter(m =>
+      !m.installed && (requiredNow.has(m.filename) || requiredNow.has(m.name)),
+    );
+    for (const model of missing) {
       await handleInstall(model);
     }
-  }, [filteredModels, handleInstall]);
+  }, [allModels, workflowRequired, handleInstall]);
 
   const toggleTypeFilter = useCallback((type: string) => {
     setTypeFilter(prev => {
@@ -266,24 +270,48 @@ export default function Models() {
     setTypeFilter(new Set());
   }, []);
 
-  const installedCount = models.filter(m => m.installed).length;
-  const totalDiskSize = models
+  const installedCount = allModels.filter(m => m.installed).length;
+  const totalDiskSize = allModels
     .filter(m => m.installed)
     .reduce((sum, m) => sum + (m.fileSize || 0), 0);
-  const missingInFilter = selectedWorkflow
-    ? filteredModels.filter(m => !m.installed).length
+  // "Missing for workflow" counts against the full catalog so the banner count
+  // reflects global state, not just the current page.
+  const missingInFilter = selectedWorkflow && workflowRequired.size > 0
+    ? allModels.filter(m =>
+        !m.installed && (workflowRequired.has(m.filename) || workflowRequired.has(m.name)),
+      ).length
     : 0;
 
-  const getDownloadForModel = (model: CatalogModel) => {
-    const dl = findDownloadForModel(downloads, { name: model.name, filename: model.filename });
-    if (!dl) return undefined;
-    return { modelName: model.name, downloadId: dl.taskId, progress: dl.progress, status: dl.status };
-  };
+  // Map model.name -> download descriptor so each <ModelRow> only receives the
+  // download object that actually concerns it (memoized rows won't re-render
+  // when unrelated download ticks arrive).
+  const downloadsByModel = useMemo(() => {
+    const map: Record<string, ModelRowDownload> = {};
+    for (const m of models) {
+      const dl = findDownloadForModel(downloads, { name: m.name, filename: m.filename });
+      if (!dl) continue;
+      map[m.name] = {
+        modelName: m.name,
+        downloadId: dl.taskId,
+        progress: dl.progress,
+        status: dl.status,
+      };
+    }
+    return map;
+  }, [models, downloads]);
+
+  const handleRequestDelete = useCallback((model: CatalogModel) => {
+    setDeleteTarget(model);
+  }, []);
+
+  const handleNavigateSettings = useCallback(() => {
+    navigate('/settings');
+  }, [navigate]);
 
   const subbarDescription =
     tab === 'downloads'
       ? 'Download history'
-      : `${models.length} total, ${installedCount} installed`;
+      : `${allModels.length} total, ${installedCount} installed`;
 
   return (
     <>
@@ -304,54 +332,18 @@ export default function Models() {
         }
       />
       <div className="page-container">
-        {/* Tab strip */}
-        <div
-          role="tablist"
-          aria-label="Models sections"
-          className="mb-3 inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white p-1 shadow-sm"
-        >
-          <button
-            role="tab"
-            aria-selected={tab === 'models'}
-            onClick={() => setTab('models')}
-            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-semibold transition ${
-              tab === 'models'
-                ? 'bg-slate-900 text-white'
-                : 'text-slate-600 hover:bg-slate-100'
-            }`}
-          >
-            <Box className="w-3.5 h-3.5" />
-            Models
-          </button>
-          <button
-            role="tab"
-            aria-selected={tab === 'downloads'}
-            onClick={() => setTab('downloads')}
-            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-semibold transition ${
-              tab === 'downloads'
-                ? 'bg-slate-900 text-white'
-                : 'text-slate-600 hover:bg-slate-100'
-            }`}
-          >
-            <History className="w-3.5 h-3.5" />
-            Downloads
-          </button>
-        </div>
-
-        {tab === 'downloads' ? (
-          <DownloadsTab />
-        ) : loading ? (
+        {loading && models.length === 0 && tab === 'models' ? (
           <div className="flex items-center justify-center h-64">
             <Loader2 className="w-6 h-6 text-gray-400 animate-spin" />
           </div>
         ) : (
         <div className="panel">
           <div className="flex flex-col lg:flex-row min-h-[calc(100vh-180px)] relative">
-            {/* ===== Left sidebar ===== */}
-            <aside className={`${filtersOpen ? 'block' : 'hidden'} lg:block w-full lg:w-72 shrink-0 border-b lg:border-b-0 lg:border-r border-slate-200 p-4 space-y-5 bg-white`}>
-              {/* Workflow filter */}
+            {/* ===== Left sidebar (Models tab only) ===== */}
+            <aside className={`${tab === 'models' ? '' : 'hidden'} ${filtersOpen ? 'block' : 'hidden'} lg:block w-full lg:w-72 shrink-0 border-b lg:border-b-0 lg:border-r border-slate-200 p-4 space-y-5 bg-white ${tab !== 'models' ? 'lg:hidden' : ''}`}>
+              {/* Template filter */}
               <div>
-                <label className="field-label mb-1.5 block">Filter by workflow</label>
+                <label className="field-label mb-1.5 block">Filter by template</label>
                 <Select
                   value={selectedWorkflow || 'all'}
                   onValueChange={(v) => setSelectedWorkflow(v === 'all' ? '' : v)}
@@ -368,19 +360,19 @@ export default function Models() {
                 </Select>
               </div>
 
-              {/* Search */}
+              {/* Installed filter */}
               <div>
-                <label className="field-label mb-1.5 block">Search</label>
-                <div className="field-wrap">
-                  <Search className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                  <input
-                    type="text"
-                    className="field-input"
-                    placeholder="Search models..."
-                    value={search}
-                    onChange={e => setSearch(e.target.value)}
-                  />
-                </div>
+                <label className="field-label mb-1.5 block">Installed</label>
+                <Select value={installedFilter} onValueChange={(v) => setInstalledFilter(v as 'all' | 'yes' | 'no')}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All</SelectItem>
+                    <SelectItem value="yes">Installed</SelectItem>
+                    <SelectItem value="no">Not installed</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
 
               {/* Type filter */}
@@ -408,16 +400,16 @@ export default function Models() {
               <div className="pt-4 border-t border-slate-200">
                 <label className="field-label mb-3 block">Storage</label>
                 <div className="grid grid-cols-2 gap-2">
-                  <div className="rounded-md bg-emerald-50 ring-1 ring-inset ring-emerald-100 px-3 py-2">
-                    <p className="text-[10px] font-medium uppercase tracking-wide text-emerald-700/70">Installed</p>
-                    <p className="text-lg font-bold text-emerald-700 leading-tight mt-0.5">{installedCount}</p>
+                  <div className="stat-box bg-emerald-50 ring-emerald-100">
+                    <p className="stat-box-label text-emerald-700/70">Installed</p>
+                    <p className="stat-box-value text-emerald-700">{installedCount}</p>
                   </div>
-                  <div className="rounded-md bg-slate-50 ring-1 ring-inset ring-slate-200 px-3 py-2">
-                    <p className="text-[10px] font-medium uppercase tracking-wide text-slate-500">Available</p>
-                    <p className="text-lg font-bold text-slate-700 leading-tight mt-0.5">{models.length}</p>
+                  <div className="stat-box bg-slate-50 ring-slate-200">
+                    <p className="stat-box-label text-slate-500">Available</p>
+                    <p className="stat-box-value text-slate-700">{allModels.length}</p>
                   </div>
-                  <div className="col-span-2 rounded-md bg-gradient-to-br from-teal-50 to-slate-50 ring-1 ring-inset ring-teal-100 px-3 py-2">
-                    <p className="text-[10px] font-medium uppercase tracking-wide text-teal-700/70">Disk Usage</p>
+                  <div className="stat-box col-span-2 bg-gradient-to-br from-teal-50 to-slate-50 ring-teal-100">
+                    <p className="stat-box-label text-teal-700/70">Disk Usage</p>
                     <p className="text-sm font-semibold text-teal-700 leading-tight mt-0.5 font-mono">{formatBytes(totalDiskSize)}</p>
                   </div>
                 </div>
@@ -426,6 +418,54 @@ export default function Models() {
 
             {/* ===== Right content ===== */}
             <main className="flex-1 p-4 overflow-y-auto">
+              {/* Toolbar — search (Models tab only) + tab strip */}
+              <div className="flex flex-col md:flex-row md:items-center gap-2 mb-4">
+                {tab === 'models' && (
+                  <div className="flex-1 field-wrap">
+                    <Search className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    <input
+                      type="text"
+                      className="field-input"
+                      placeholder="Search models..."
+                      value={search}
+                      onChange={e => setSearch(e.target.value)}
+                    />
+                  </div>
+                )}
+                <div
+                  role="tablist"
+                  aria-label="Models sections"
+                  className={`${tab === 'models' ? '' : 'flex-1'} inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white p-1 shadow-sm self-start md:self-auto`}
+                >
+                  <button
+                    role="tab"
+                    aria-selected={tab === 'models'}
+                    onClick={() => setTab('models')}
+                    className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-semibold transition ${
+                      tab === 'models' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    <Box className="w-3.5 h-3.5" />
+                    Models
+                  </button>
+                  <button
+                    role="tab"
+                    aria-selected={tab === 'downloads'}
+                    onClick={() => setTab('downloads')}
+                    className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-semibold transition ${
+                      tab === 'downloads' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    <History className="w-3.5 h-3.5" />
+                    Downloads
+                  </button>
+                </div>
+              </div>
+
+              {tab === 'downloads' ? (
+                <DownloadsTab />
+              ) : (
+              <>
               {/* Download All Missing banner */}
               {selectedWorkflow && missingInFilter > 0 && (
                 <div className="flex items-center justify-between p-3 bg-amber-50 border border-amber-200 rounded-lg mb-4">
@@ -440,134 +480,30 @@ export default function Models() {
                 </div>
               )}
 
-              {/* Models list */}
-              {Object.keys(grouped).length > 0 ? (
-                <div className="space-y-3">
-                  {Object.entries(grouped).map(([type, typeModels]) => {
-                    const installedCountInType = typeModels.filter(m => m.installed).length;
-                    return (
-                      <section key={type} className="panel">
-                        <div className="panel-header flex items-center justify-between gap-3">
-                          <div className="flex items-center gap-2">
-                            <Box className="w-3.5 h-3.5 text-slate-400" />
-                            <h2 className="panel-header-title">{TYPE_LABELS[type] || type}</h2>
-                          </div>
-                          <span className="badge-pill badge-slate">
-                            {installedCountInType}/{typeModels.length} installed
-                          </span>
-                        </div>
-                        <div className="divide-y divide-slate-100 max-h-[360px] overflow-y-auto scrollbar-subtle">
-                          {typeModels.map((model, i) => {
-                            const dl = getDownloadForModel(model);
-                            const isRequired = workflowRequired.has(model.filename) || workflowRequired.has(model.name);
-                            return (
-                              <div
-                                key={`${model.name}-${i}`}
-                                className="flex items-center gap-3 py-2.5 px-4 hover:bg-slate-50"
-                              >
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-sm font-medium text-slate-900 truncate">
-                                    {model.filename || model.name}
-                                  </p>
-                                  <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                                    {model.fileSize ? (
-                                      <span className="text-[11px] text-slate-500">{formatBytes(model.fileSize)}</span>
-                                    ) : model.size_bytes ? (
-                                      <span className="text-[11px] text-slate-500">{model.size_pretty || formatBytes(model.size_bytes)}</span>
-                                    ) : null}
-                                    {model.installed && model.fileStatus !== 'corrupt' && model.fileStatus !== 'incomplete' ? (
-                                      <span className="badge-pill badge-emerald">Installed</span>
-                                    ) : model.fileStatus === 'corrupt' ? (
-                                      <span
-                                        className="badge-pill bg-red-50 text-red-700 ring-red-200 inline-flex items-center gap-1"
-                                        title={`On disk: ${formatBytes(model.fileSize || 0)} — expected ${model.size_pretty || formatBytes(model.size_bytes)}`}
-                                      >
-                                        <AlertTriangle className="w-3 h-3" /> Corrupt
-                                      </span>
-                                    ) : model.fileStatus === 'incomplete' ? (
-                                      <span
-                                        className="badge-pill bg-amber-50 text-amber-700 ring-amber-200 inline-flex items-center gap-1"
-                                        title={`On disk: ${formatBytes(model.fileSize || 0)} — expected ${model.size_pretty || formatBytes(model.size_bytes)}`}
-                                      >
-                                        <AlertTriangle className="w-3 h-3" /> Incomplete
-                                      </span>
-                                    ) : (
-                                      <span className="text-[11px] text-slate-400">Not installed</span>
-                                    )}
-                                    {model.gated && (
-                                      <span
-                                        className="badge-pill bg-slate-100 text-slate-700 ring-slate-300 inline-flex items-center gap-1"
-                                        title={model.gated_message || 'Requires HuggingFace token'}
-                                      >
-                                        <Lock className="w-3 h-3" /> Gated
-                                      </span>
-                                    )}
-                                    {isRequired && selectedWorkflow && (
-                                      <span className="badge-pill badge-amber">Required</span>
-                                    )}
-                                  </div>
-                                </div>
-                                <div className="shrink-0">
-                                  {dl && dl.status === 'queued' ? (
-                                    <span className="badge-pill bg-slate-100 text-slate-600 ring-slate-200 inline-flex items-center gap-1">
-                                      <Loader2 className="w-3 h-3 animate-spin" /> Queued
-                                    </span>
-                                  ) : dl ? (
-                                    <div className="flex items-center gap-2">
-                                      <div className="w-24">
-                                        <div className="flex justify-between text-[10px] text-slate-500 mb-0.5">
-                                          <span>{Math.round(dl.progress)}%</span>
-                                        </div>
-                                        <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                                          <div
-                                            className="h-full bg-teal-500 rounded-full transition-all duration-300"
-                                            style={{ width: `${dl.progress}%` }}
-                                          />
-                                        </div>
-                                      </div>
-                                      <button
-                                        onClick={() => handleCancelDownload(model.name, dl.downloadId)}
-                                        className="btn-icon"
-                                        title="Cancel download"
-                                      >
-                                        <X className="w-4 h-4" />
-                                      </button>
-                                    </div>
-                                  ) : model.installed ? (
-                                    <button
-                                      onClick={() => setDeleteTarget(model)}
-                                      className="btn-icon hover:!text-red-500"
-                                      title="Delete model"
-                                    >
-                                      <Trash2 className="w-4 h-4" />
-                                    </button>
-                                  ) : model.gated && !hfTokenConfigured ? (
-                                    <button
-                                      onClick={() => navigate('/settings')}
-                                      className="btn-secondary"
-                                      title={model.gated_message || 'Requires HuggingFace token — click to configure'}
-                                    >
-                                      <Lock className="w-3.5 h-3.5" />
-                                      HF token
-                                    </button>
-                                  ) : (
-                                    <button
-                                      onClick={() => handleInstall(model)}
-                                      className="btn-primary"
-                                    >
-                                      <Download className="w-3.5 h-3.5" />
-                                      Download
-                                    </button>
-                                  )}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </section>
-                    );
-                  })}
-                </div>
+              {/* Models list — single flat list; type shown as badge per row */}
+              {filteredModels.length > 0 ? (
+                <section className="panel">
+                  <div className="divide-y divide-slate-100">
+                    {filteredModels.map((model, i) => {
+                      const isRequired = workflowRequired.has(model.filename) || workflowRequired.has(model.name);
+                      return (
+                        <ModelRow
+                          key={`${model.name}-${i}`}
+                          model={model}
+                          download={downloadsByModel[model.name]}
+                          isRequired={isRequired}
+                          selectedWorkflow={selectedWorkflow}
+                          hfTokenConfigured={hfTokenConfigured}
+                          showTypeBadge
+                          onInstall={handleInstall}
+                          onDelete={handleRequestDelete}
+                          onCancelDownload={handleCancelDownload}
+                          onNavigateSettings={handleNavigateSettings}
+                        />
+                      );
+                    })}
+                  </div>
+                </section>
               ) : (
                 <div className="text-center py-16">
                   {!connected ? (
@@ -583,7 +519,7 @@ export default function Models() {
                         Check Settings
                       </button>
                     </>
-                  ) : models.length === 0 ? (
+                  ) : allModels.length === 0 ? (
                     <>
                       <Box className="w-10 h-10 text-slate-200 mx-auto mb-3" />
                       <p className="text-sm font-medium text-slate-500">No models found</p>
@@ -602,6 +538,25 @@ export default function Models() {
                     </>
                   )}
                 </div>
+              )}
+
+              {/* Pagination only when browsing the full catalog. When a
+                  template filter is active the list is the fixed required
+                  set — pagination would be misleading. */}
+              {!selectedWorkflow && (
+                <div className="mt-4">
+                  <Pagination
+                    page={paged.page}
+                    pageSize={paged.pageSize}
+                    total={paged.total}
+                    hasMore={paged.hasMore}
+                    onPageChange={paged.setPage}
+                    onPageSizeChange={paged.setPageSize}
+                    className="rounded-lg border border-slate-200 bg-slate-50"
+                  />
+                </div>
+              )}
+              </>
               )}
             </main>
           </div>

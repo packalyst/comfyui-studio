@@ -3,14 +3,17 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import { AppProvider } from './context/AppContext';
+import { TooltipProvider } from './components/ui/tooltip';
 import './index.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-      <AppProvider>
-        <App />
-      </AppProvider>
+      <TooltipProvider delayDuration={150}>
+        <AppProvider>
+          <App />
+        </AppProvider>
+      </TooltipProvider>
     </BrowserRouter>
   </React.StrictMode>
 );

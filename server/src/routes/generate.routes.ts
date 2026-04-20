@@ -96,15 +96,27 @@ router.post('/generate', generateLimiter, async (req: Request, res: Response) =>
       return;
     }
 
-    // 1. Fetch the workflow JSON from ComfyUI
-    const wfRes = await fetch(
-      `${COMFYUI_URL}/templates/${encodeURIComponent(templateName)}.json`
-    );
-    if (!wfRes.ok) {
-      res.status(404).json({ error: 'Workflow not found' });
-      return;
+    // 1. Fetch the workflow JSON. User-imported templates live only on our
+    //    disk (ComfyUI doesn't know about them) so resolve those locally
+    //    first; everything else comes from ComfyUI's templates dir.
+    let workflow: Record<string, unknown>;
+    if (templates.isUserWorkflow(templateName)) {
+      const local = templates.getUserWorkflowJson(templateName);
+      if (!local) {
+        res.status(404).json({ error: 'User workflow file missing or unreadable' });
+        return;
+      }
+      workflow = local;
+    } else {
+      const wfRes = await fetch(
+        `${COMFYUI_URL}/templates/${encodeURIComponent(templateName)}.json`
+      );
+      if (!wfRes.ok) {
+        res.status(404).json({ error: 'Workflow not found' });
+        return;
+      }
+      workflow = await wfRes.json() as Record<string, unknown>;
     }
-    const workflow = await wfRes.json();
 
     // 2. Split + apply proxy-widget overrides (before conversion).
     const { proxyEntries, nodeOverrides } = splitAdvancedSettings(advancedSettings);

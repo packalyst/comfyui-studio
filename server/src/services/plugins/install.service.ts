@@ -6,6 +6,7 @@
 import { randomUUID } from 'crypto';
 import fs from 'fs';
 import { logger } from '../../lib/logger.js';
+import * as bus from '../../lib/events.js';
 import * as liveSettings from '../systemLauncher/liveSettings.js';
 import * as history from './history.service.js';
 import * as progress from './progress.service.js';
@@ -215,6 +216,7 @@ async function runInstallTask(taskId: string, pluginId: string, op: () => Promis
     succeed(taskId, msg);
     cache.clearPluginCache(pluginId);
     cache.refreshInstalledPlugins();
+    bus.emit('plugin:installed', { pluginId });
     await triggerRestart(`plugin install: ${pluginId}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

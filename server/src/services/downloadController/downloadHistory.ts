@@ -5,7 +5,6 @@
 // so a crash mid-save cannot truncate the file.
 
 import fs from 'fs';
-import path from 'path';
 import { paths } from '../../config/paths.js';
 import { atomicWrite, safeResolve } from '../../lib/fs.js';
 import { logger } from '../../lib/logger.js';
@@ -29,9 +28,9 @@ export interface DownloadHistoryItem {
 
 const MAX_HISTORY_ITEMS = 100;
 
-/** The history file lives under the launcher data dir (default: bundled data). */
+/** The history file lives under the runtime-state dir (survives image rebuilds). */
 function historyFile(): string {
-  return path.join(paths.dataDir, 'download-history.json');
+  return paths.downloadHistoryPath;
 }
 
 let cache: DownloadHistoryItem[] | null = null;
@@ -44,7 +43,16 @@ function load(): DownloadHistoryItem[] {
       const raw = fs.readFileSync(file, 'utf8');
       const parsed = JSON.parse(raw) as unknown;
       cache = Array.isArray(parsed) ? parsed as DownloadHistoryItem[] : [];
-      logger.info('download history loaded', { count: cache.length });
+      const before = cache.length;
+      cache = collapseDuplicates(cache);
+      if (cache.length !== before) {
+        logger.info('download history de-duplicated on load', {
+          before, after: cache.length,
+        });
+        persist();
+      } else {
+        logger.info('download history loaded', { count: cache.length });
+      }
     } else {
       cache = [];
     }
@@ -57,6 +65,30 @@ function load(): DownloadHistoryItem[] {
   return cache;
 }
 
+/**
+ * Collapse pre-existing duplicate rows that share a `taskId`. We used to
+ * generate a fresh `id` per `addHistoryItem` call, so a double-invocation of
+ * the download handler left two rows per task. Keep the row whose terminal
+ * progress is richest (success > failed/canceled > downloading-with-bytes >
+ * everything else).
+ */
+function collapseDuplicates(arr: DownloadHistoryItem[]): DownloadHistoryItem[] {
+  const bestByTask = new Map<string, DownloadHistoryItem>();
+  const withoutTaskId: DownloadHistoryItem[] = [];
+  const score = (r: DownloadHistoryItem): number => {
+    if (r.status === 'success') return 4;
+    if (r.status === 'failed' || r.status === 'canceled') return 3;
+    if (r.status === 'downloading' && (r.downloadedSize ?? 0) > 0) return 2;
+    return 1;
+  };
+  for (const row of arr) {
+    if (!row.taskId) { withoutTaskId.push(row); continue; }
+    const prev = bestByTask.get(row.taskId);
+    if (!prev || score(row) > score(prev)) bestByTask.set(row.taskId, row);
+  }
+  return [...bestByTask.values(), ...withoutTaskId];
+}
+
 function persist(): void {
   const data = cache ?? [];
   try {
@@ -64,8 +96,8 @@ function persist(): void {
     if (data.length > MAX_HISTORY_ITEMS) {
       cache = data.slice(-MAX_HISTORY_ITEMS);
     }
-    // safeResolve verifies the file stays within paths.dataDir.
-    const target = safeResolve(paths.dataDir, 'download-history.json');
+    // safeResolve verifies the file stays within the runtime-state dir.
+    const target = safeResolve(paths.runtimeStateDir, 'download-history.json');
     atomicWrite(target, JSON.stringify(cache ?? []));
   } catch (err) {
     logger.error('download history save failed', {
@@ -80,9 +112,28 @@ export function listHistory(): DownloadHistoryItem[] {
 
 export function addHistoryItem(item: DownloadHistoryItem): void {
   const arr = load();
-  const idx = arr.findIndex((r) => r.id === item.id);
-  if (idx >= 0) arr[idx] = { ...arr[idx], ...item };
-  else arr.push(item);
+  // Exact-id match wins (re-insert of an existing row).
+  const idxById = arr.findIndex((r) => r.id === item.id);
+  if (idxById >= 0) {
+    arr[idxById] = { ...arr[idxById], ...item };
+    persist();
+    return;
+  }
+  // Same-taskId match on an in-flight row → merge into it instead of
+  // inserting a duplicate. Guards against double-click / strict-mode
+  // double-invoke / handler re-entry creating parallel history rows for the
+  // same underlying download task.
+  if (item.taskId && item.status === 'downloading') {
+    const idxByTask = arr.findIndex(
+      (r) => r.taskId === item.taskId && r.status === 'downloading',
+    );
+    if (idxByTask >= 0) {
+      arr[idxByTask] = { ...arr[idxByTask], ...item, id: arr[idxByTask].id };
+      persist();
+      return;
+    }
+  }
+  arr.push(item);
   persist();
 }
 

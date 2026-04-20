@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { env } from '../../config/env.js';
 import { logger } from '../../lib/logger.js';
+import * as bus from '../../lib/events.js';
 import { getExistingHubScanDirs } from './sharedModelHub.js';
 import { inferModelType, getModelSaveDir } from './download.service.js';
 import type { CatalogModelEntry } from './download.service.js';
@@ -108,6 +109,14 @@ export async function deleteModel(
     }
     fs.rmSync(modelPath, { force: true });
     logger.info('model deleted', { modelName });
+    // Notify readiness subscribers. Both the catalog filename and the
+    // resolved display name are broadcast so template dep edges keyed on
+    // either variant get flipped.
+    const targetFilename = info.filename || modelName;
+    bus.emit('model:removed', { filename: targetFilename });
+    if (info.name && info.name !== targetFilename) {
+      bus.emit('model:removed', { filename: info.name });
+    }
     return { success: true, message: `Model ${modelName} deleted successfully` };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

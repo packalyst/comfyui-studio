@@ -36,6 +36,8 @@ const STUDIO = {
   STUDIO_CONFIG_FILE: process.env.STUDIO_CONFIG_FILE,
   /** Directory holding per-template exposed-widget records. Resolved in `paths.ts`. */
   STUDIO_EXPOSED_WIDGETS_DIR: process.env.STUDIO_EXPOSED_WIDGETS_DIR,
+  /** Absolute path to the sqlite database file. Resolved in `paths.ts`. */
+  STUDIO_SQLITE_PATH: process.env.STUDIO_SQLITE_PATH,
   /** Max multipart upload size in bytes. Default 50 MiB. */
   UPLOAD_MAX_BYTES: readNumber(process.env.UPLOAD_MAX_BYTES, 50 * 1024 * 1024),
   /**
@@ -116,6 +118,8 @@ const LAUNCHER = {
   CIVITAI_API_BASE: process.env.CIVITAI_API_BASE ?? 'https://civitai.com/api/v1',
   /** Maximum proxied CivitAI response size in bytes. Default 10 MiB. */
   CIVITAI_MAX_RESPONSE_BYTES: readNumber(process.env.CIVITAI_MAX_RESPONSE_BYTES, 10 * 1024 * 1024),
+  /** CivitAI API token seed (optional). Persisted via `settings.civitaiToken` takes precedence. */
+  CIVITAI_TOKEN: process.env.CIVITAI_TOKEN ?? '',
 } as const;
 
 export const env = { ...STUDIO, ...LAUNCHER } as const;
@@ -134,4 +138,13 @@ export function isProduction(): boolean {
  */
 export function currentProcessEnv(): NodeJS.ProcessEnv {
   return process.env;
+}
+
+/**
+ * Read the current `STUDIO_SQLITE_PATH` override live. `paths.sqlitePath`
+ * resolves through this getter so vitest can swap the DB location between
+ * test cases without a module re-import.
+ */
+export function currentSqliteOverride(): string | undefined {
+  return process.env.STUDIO_SQLITE_PATH;
 }

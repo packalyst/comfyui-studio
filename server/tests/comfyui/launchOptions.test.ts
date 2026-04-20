@@ -11,7 +11,13 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-launch-opts-'));
 
 vi.mock('../../src/config/paths.js', async (orig) => {
   const actual = (await orig()) as { paths: Record<string, unknown> };
-  return { paths: { ...actual.paths, dataDir: TMP } };
+  return {
+    paths: {
+      ...actual.paths,
+      dataDir: TMP,
+      launchOptionsPath: path.join(TMP, 'comfyui-launch-options.json'),
+    },
+  };
 });
 
 const svc = await import('../../src/services/comfyui/launchOptions.service.js');

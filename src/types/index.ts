@@ -90,12 +90,11 @@ export interface Template {
   username?: string;
   date?: string;
   logos?: string[];
-}
-
-export interface TemplateCategory {
-  name: string;
-  isEssential?: boolean;
-  templates: Template[];
+  /**
+   * True when every required model + plugin is installed on disk. Emitted by
+   * the backend from the `templates.installed` column; `false` when unknown.
+   */
+  ready?: boolean;
 }
 
 export interface QueueStatus {
@@ -141,13 +140,6 @@ export interface GalleryItem {
   favorite?: boolean;
 }
 
-export interface ModelInfo {
-  name: string;
-  type: string;
-  size: number;
-  path: string;
-}
-
 export interface AppSettings {
   comfyuiUrl: string;
   gpuUnloadTimeout: number;
@@ -156,18 +148,6 @@ export interface AppSettings {
   defaultWidth: number;
   defaultHeight: number;
   galleryPath: string;
-}
-
-export interface ProgressUpdate {
-  type: 'progress' | 'executing' | 'executed' | 'execution_complete' | 'error';
-  data: {
-    value?: number;
-    max?: number;
-    node?: string;
-    prompt_id?: string;
-    output?: Record<string, unknown>;
-    exception_message?: string;
-  };
 }
 
 export interface LauncherStatus {
@@ -227,18 +207,12 @@ export interface CatalogModel {
   installed: boolean;
   fileSize?: number;
   fileStatus?: 'complete' | 'incomplete' | 'corrupt' | null;
-}
-
-export interface LauncherModel {
-  name: string;
-  type: string;
-  filename: string;
-  url: string;
-  size?: string;
-  fileSize?: number;
-  installed: boolean;
-  save_path?: string;
-  description?: string;
+  /** Preview image URL, populated at download start from card metadata. */
+  thumbnail?: string;
+  /** In-flight download marker — set true from download start to completion. */
+  downloading?: boolean;
+  /** Last download failure message (cleared when a new download starts). */
+  error?: string;
 }
 
 export interface RequiredModel {
@@ -287,4 +261,165 @@ export interface EnumeratedWidget {
   exposed: boolean;
   /** True when the widget is driven by the main form (Prompt / upload field). Modal hides these. */
   formClaimed?: boolean;
+}
+
+/* =================================================================
+ * Plugin / Python / CivitAI types
+ *
+ * These shapes mirror the backend service types verified against
+ * server/src/services/plugins/*.ts, server/src/services/python/*.ts,
+ * and server/src/services/civitai/*.ts. The CivitAI shapes are
+ * intentionally partial because the backend is a thin proxy to the
+ * upstream CivitAI REST API; only the fields rendered by the UI are
+ * typed strictly.
+ * ================================================================= */
+
+// Mirrors server's CatalogPlugin (cache.service.ts:16-48) overlayed with
+// the installed-state fields from info.types.ts.
+export interface Plugin {
+  id: string;
+  name: string;
+  description: string;
+  author: string;
+  repository: string;
+  version: string;
+  latest_version?: {
+    id?: string;
+    version?: string;
+    changelog?: string;
+    deprecated?: boolean;
+    status?: string;
+  } | null;
+  versions?: Array<{
+    id?: string;
+    version?: string;
+    changelog?: string;
+    createdAt?: string;
+    deprecated?: boolean;
+    status?: string;
+  }>;
+  status: string;
+  status_detail?: string;
+  rating: number;
+  downloads: number;
+  github_stars: number;
+  icon?: string;
+  banner_url?: string;
+  category?: string;
+  license?: string;
+  tags?: string[];
+  dependencies?: string[];
+  installed: boolean;
+  installedOn?: string;
+  disabled: boolean;
+  install_type?: string;
+  stars?: number;
+  github?: string;
+}
+
+// Mirrors server's PluginTaskProgress (progress.service.ts:7-15).
+export interface PluginTaskProgress {
+  progress: number;
+  completed: boolean;
+  pluginId: string;
+  type: 'install' | 'uninstall' | 'disable' | 'enable' | 'switch-version';
+  message?: string;
+  githubProxy?: string;
+  logs?: string[];
+}
+
+// Mirrors server's PluginOperationHistory (history.service.ts:14-27).
+export interface PluginHistoryEntry {
+  id: string;
+  pluginId: string;
+  pluginName?: string;
+  type: 'install' | 'uninstall' | 'disable' | 'enable' | 'switch-version';
+  typeText?: string;
+  startTime: number;
+  endTime?: number;
+  status: 'running' | 'success' | 'failed';
+  statusText?: string;
+  logs: string[];
+  result?: string;
+  githubProxy?: string;
+}
+
+// Mirrors server's InstalledPackage (packages.service.ts:10-13).
+export interface PythonPackage {
+  name: string;
+  version: string;
+}
+
+// Mirrors server's DependencyItem (dependencies.service.ts:14-19).
+export interface PythonDependencyItem {
+  name: string;
+  version: string;
+  missing?: boolean;
+  versionMismatch?: boolean;
+}
+
+// Mirrors server's PluginDependencyReport (dependencies.service.ts:21-25).
+export interface PluginDependencyReport {
+  plugin: string;
+  dependencies: PythonDependencyItem[];
+  missingDeps: string[];
+}
+
+// Partial of CivitAI's public Model object. Only the fields we render
+// are declared strictly; the rest is dropped/ignored at runtime.
+export interface CivitaiModelSummary {
+  id: number;
+  name: string;
+  description?: string | null;
+  type?: string;
+  nsfw?: boolean;
+  creator?: {
+    username?: string;
+    image?: string | null;
+  };
+  stats?: {
+    downloadCount?: number;
+    favoriteCount?: number;
+    thumbsUpCount?: number;
+    rating?: number;
+  };
+  modelVersions?: Array<{
+    id: number;
+    name?: string;
+    baseModel?: string;
+    images?: Array<{
+      url?: string;
+      width?: number;
+      height?: number;
+      type?: string;
+      nsfwLevel?: number;
+    }>;
+    files?: Array<{
+      id?: number;
+      name?: string;
+      sizeKB?: number;
+      downloadUrl?: string;
+    }>;
+    downloadUrl?: string;
+  }>;
+  tags?: string[];
+}
+
+// Response from GET /civitai/download/models/:versionId — CivitAI's version
+// detail endpoint. Only the url/filename fields we care about.
+export interface CivitaiDownloadInfo {
+  id?: number;
+  modelId?: number;
+  name?: string;
+  baseModel?: string;
+  files?: Array<{
+    id?: number;
+    name?: string;
+    sizeKB?: number;
+    downloadUrl?: string;
+    primary?: boolean;
+    type?: string;
+  }>;
+  downloadUrl?: string;
+  model?: { name?: string; type?: string };
 }

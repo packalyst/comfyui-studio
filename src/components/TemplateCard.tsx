@@ -1,6 +1,8 @@
+import { memo, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Image, Video, Music, Box, HardDrive, Cpu, BarChart3 } from 'lucide-react';
 import type { Template } from '../types';
+import { formatBytes } from '../lib/utils';
 import ModelBadge from './ModelBadge';
 
 interface Props {
@@ -21,23 +23,25 @@ const gradientMap: Record<string, string> = {
   '3d': 'from-green-400 to-green-600',
 };
 
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
-}
-
 function formatUsage(count: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M uses`;
   if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k uses`;
   return `${count} uses`;
 }
 
-export default function TemplateCard({ template }: Props) {
+function TemplateCard({ template }: Props) {
   const navigate = useNavigate();
   const Icon = mediaIcons[template.mediaType] || Image;
   const gradient = gradientMap[template.mediaType] || 'from-gray-400 to-gray-600';
+
+  const uniqueModels = useMemo(
+    () => Array.from(new Set(template.models)).slice(0, 3),
+    [template.models],
+  );
+  const uniqueTags = useMemo(
+    () => Array.from(new Set(template.tags)).slice(0, 3),
+    [template.tags],
+  );
 
   return (
     <button
@@ -67,6 +71,11 @@ export default function TemplateCard({ template }: Props) {
           </div>
         )}
         <div className="absolute top-2 right-2 flex items-center gap-1.5">
+          {template.ready === true && (
+            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-emerald-500/90 text-white">
+              Ready
+            </span>
+          )}
           {template.openSource !== undefined && (
             <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
               template.openSource
@@ -120,13 +129,13 @@ export default function TemplateCard({ template }: Props) {
           </div>
 
           <div className="flex flex-wrap gap-1.5">
-            {Array.from(new Set(template.models)).slice(0, 3).map(model => (
+            {uniqueModels.map(model => (
               <ModelBadge key={model} name={model} />
             ))}
           </div>
-          {template.tags.length > 0 && (
+          {uniqueTags.length > 0 && (
             <div className="flex flex-wrap gap-1 mt-2">
-              {Array.from(new Set(template.tags)).slice(0, 3).map(tag => (
+              {uniqueTags.map(tag => (
                 <span key={tag} className="text-[10px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">
                   {tag}
                 </span>
@@ -138,3 +147,5 @@ export default function TemplateCard({ template }: Props) {
     </button>
   );
 }
+
+export default memo(TemplateCard);

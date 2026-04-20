@@ -92,7 +92,7 @@ export class LogService implements ComfyUILogStore {
   }
 
   private resetLogDir(): string {
-    return path.join(paths.dataDir, 'logs');
+    return paths.resetLogsDir;
   }
 
   private resetLogFilePath(): string {

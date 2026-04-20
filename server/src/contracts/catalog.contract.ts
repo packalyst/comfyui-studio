@@ -20,6 +20,12 @@ export interface CatalogModel {
   gated_message?: string;
   /** Where this entry was first discovered: 'comfyui' seed, 'template:<name>', 'user', or 'scan'. */
   source: string;
+  /** Optional preview image URL (populated at download-start from card metadata). */
+  thumbnail?: string;
+  /** In-flight download marker. Set true at download-start; cleared on completion. */
+  downloading?: boolean;
+  /** Last download failure message. Cleared when a subsequent download starts. */
+  error?: string;
 }
 
 /** Catalog entry augmented with on-disk state from the launcher scan. */

@@ -47,6 +47,37 @@ export function persistCurrent(): void {
   persist(load());
 }
 
+/**
+ * Mark a catalog row as complete-on-disk. Clears in-flight flag + any prior
+ * error. Called from the completion path via `model:installed` event.
+ */
+export function markInstalled(filename: string, opts: { fileSize?: number } = {}): CatalogModel | null {
+  const data = load();
+  const m = data.models.find(x => x.filename === filename);
+  if (!m) return null;
+  m.downloading = false;
+  m.error = undefined;
+  if (opts.fileSize && (!m.size_bytes || m.size_bytes === 0)) {
+    m.size_bytes = opts.fileSize;
+  }
+  persist(data);
+  return m;
+}
+
+/**
+ * Stamp a failure message on the catalog row and clear the in-flight flag.
+ * Row stays around so the UI can offer a retry.
+ */
+export function markDownloadFailed(filename: string, error: string): CatalogModel | null {
+  const data = load();
+  const m = data.models.find(x => x.filename === filename);
+  if (!m) return null;
+  m.downloading = false;
+  m.error = error;
+  persist(data);
+  return m;
+}
+
 function mapSeedEntry(m: Record<string, unknown>): CatalogModel {
   return {
     filename: String(m.filename || ''),

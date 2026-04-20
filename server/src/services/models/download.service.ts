@@ -155,6 +155,53 @@ export function validateHfUrl(
   }
 }
 
+/**
+ * Validate a CivitAI download URL. The public download endpoint is
+ * `https://civitai.com/api/download/models/:versionId` — it 302-redirects
+ * to the actual file. We accept `civitai.com` + `www.civitai.com`.
+ *
+ * Civitai does not put the real filename in the URL; the redirect exposes it
+ * via `Content-Disposition`. Callers that need the filename up-front should
+ * resolve the version via the civitai service and pass `modelName`/`filename`
+ * on the download request. Here we only confirm the URL is well-formed and on
+ * the allowed host.
+ */
+export function validateCivitaiUrl(
+  url: string,
+): { isValid: boolean; error?: string } {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    if (host !== 'civitai.com' && host !== 'www.civitai.com') {
+      return { isValid: false, error: 'Only civitai.com URLs are supported' };
+    }
+    if (!u.pathname.startsWith('/api/download/models/')) {
+      return { isValid: false, error: 'CivitAI URL must target /api/download/models/:versionId' };
+    }
+    return { isValid: true };
+  } catch {
+    return { isValid: false, error: 'Invalid URL format' };
+  }
+}
+
+/** Identify the upstream host family for a given download URL. */
+export type DownloadHost = 'huggingface' | 'civitai';
+
+export function detectDownloadHost(url: string): DownloadHost | null {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host === 'huggingface.co' || host === 'www.huggingface.co' || host === 'hf-mirror.com') {
+      return 'huggingface';
+    }
+    if (host === 'civitai.com' || host === 'www.civitai.com') {
+      return 'civitai';
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** Replace `/blob/` with `/resolve/` in HF URLs. */
 export function buildResolveUrl(hfUrl: string): string {
   const resolved = hfUrl.replace('/blob/', '/resolve/');

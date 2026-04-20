@@ -1,0 +1,164 @@
+// User-imported workflow templates.
+//
+// Each file under `paths.userTemplatesDir` is a TemplateData JSON document
+// whose shape mirrors upstream ComfyUI templates. On load, every file is
+// merged into the in-memory cache so the Studio / Explore pages render them
+// identically to upstream entries — the same form-inputs pipeline runs on
+// them via `generateFormInputs`.
+//
+// File names: we derive a slug from the supplied `name` (or fallback to the
+// civitai version id). Slugs are sanitized: lowercased, trimmed,
+// non-alphanumeric → `-`. This slug is also the template's `name` key (the
+// same value Studio routes on via `/studio/:name`).
+
+import fs from 'fs';
+import { atomicWrite, safeResolve } from '../../lib/fs.js';
+import { paths } from '../../config/paths.js';
+import { logger } from '../../lib/logger.js';
+import { generateFormInputs } from './templates.formInputs.js';
+import type { TemplateData, RawTemplate } from './types.js';
+
+const DIR = (): string => paths.userTemplatesDir;
+
+export function slugifyTemplateName(raw: string): string {
+  const s = (raw || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^\w\s-]/g, '')
+    .replace(/[\s_]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return s.length > 0 ? s.slice(0, 120) : 'imported-workflow';
+}
+
+function filePath(name: string): string {
+  return safeResolve(DIR(), `${name}.json`);
+}
+
+function ensureDir(): void {
+  try { fs.mkdirSync(DIR(), { recursive: true, mode: 0o700 }); } catch { /* best effort */ }
+}
+
+/**
+ * Build a TemplateData record from a civitai workflow JSON + display metadata.
+ * The civitai workflow JSON is a LiteGraph document; we keep it in the
+ * `workflow` field and let `generateFormInputs` derive form-level metadata
+ * from the raw template shape.
+ */
+export interface SaveWorkflowInput {
+  name: string;
+  title: string;
+  description?: string;
+  workflow: Record<string, unknown>;
+  sourceUrl?: string;
+  tags?: string[];
+  category?: string;
+}
+
+export function saveUserWorkflow(input: SaveWorkflowInput): TemplateData {
+  ensureDir();
+  const slug = slugifyTemplateName(input.name);
+
+  // The form-inputs generator works off a RawTemplate shape. Synthesise one
+  // from the little we know; the workflow itself carries the node metadata
+  // required to wire up advanced widgets.
+  const raw: RawTemplate = {
+    name: slug,
+    title: input.title || slug,
+    description: input.description || '',
+    mediaType: 'image',
+    tags: input.tags || [],
+    models: [],
+    date: new Date().toISOString(),
+    openSource: true,
+  };
+  const data: TemplateData = {
+    name: slug,
+    title: raw.title,
+    description: raw.description,
+    mediaType: raw.mediaType,
+    tags: raw.tags ?? [],
+    models: [],
+    category: input.category || 'User Workflows',
+    studioCategory: 'image',
+    io: { inputs: [], outputs: [] },
+    formInputs: generateFormInputs(raw),
+    thumbnail: [],
+    workflow: input.workflow,
+    size: 0,
+    vram: 0,
+    usage: 0,
+    openSource: true,
+    date: raw.date,
+  };
+  try {
+    atomicWrite(filePath(slug), JSON.stringify({ ...data, sourceUrl: input.sourceUrl }, null, 2), {
+      mode: 0o644, dirMode: 0o700,
+    });
+  } catch (err) {
+    logger.error('user workflow save failed', { slug, error: String(err) });
+    throw err instanceof Error ? err : new Error(String(err));
+  }
+  return data;
+}
+
+export function listUserWorkflows(): TemplateData[] {
+  try {
+    if (!fs.existsSync(DIR())) return [];
+    const files = fs.readdirSync(DIR()).filter((f) => f.endsWith('.json'));
+    const out: TemplateData[] = [];
+    for (const f of files) {
+      try {
+        const abs = safeResolve(DIR(), f);
+        const raw = fs.readFileSync(abs, 'utf8');
+        const parsed = JSON.parse(raw) as TemplateData;
+        // Strip any `sourceUrl` sidecar that's not part of TemplateData.
+        out.push(parsed);
+      } catch (err) {
+        logger.warn('user workflow load failed', { file: f, error: String(err) });
+      }
+    }
+    return out;
+  } catch (err) {
+    logger.error('user workflow list failed', { error: String(err) });
+    return [];
+  }
+}
+
+export function deleteUserWorkflow(name: string): boolean {
+  try {
+    const abs = filePath(name);
+    if (!fs.existsSync(abs)) return false;
+    fs.rmSync(abs, { force: true });
+    return true;
+  } catch (err) {
+    logger.error('user workflow delete failed', { name, error: String(err) });
+    return false;
+  }
+}
+
+export function isUserWorkflow(name: string): boolean {
+  try {
+    const abs = filePath(name);
+    return fs.existsSync(abs);
+  } catch { return false; }
+}
+
+/**
+ * Return just the `workflow` JSON for a user-imported template. The generate
+ * endpoint uses this to bypass ComfyUI's `/templates/:name.json` lookup for
+ * templates that only exist on our side (ComfyUI doesn't know about them).
+ */
+export function getUserWorkflowJson(name: string): Record<string, unknown> | null {
+  try {
+    const abs = filePath(name);
+    if (!fs.existsSync(abs)) return null;
+    const raw = fs.readFileSync(abs, 'utf8');
+    const parsed = JSON.parse(raw) as { workflow?: unknown };
+    if (!parsed.workflow || typeof parsed.workflow !== 'object') return null;
+    return parsed.workflow as Record<string, unknown>;
+  } catch (err) {
+    logger.error('user workflow read failed', { name, error: String(err) });
+    return null;
+  }
+}

@@ -1,6 +1,20 @@
 // CivitAI "models" endpoints. GET-only, no auth. Ports launcher's
 // `controllers/civitai/models.ts` 1:1, using `fetchWithRetry` with a response
 // size cap so large upstream payloads cannot exhaust memory.
+//
+// Pagination note verified against a live civitai response (2026-04):
+//   civitai's /models endpoint returns `{ items, metadata: { nextCursor?,
+//   nextPage?, currentPage?, pageSize? } }`. There is NO `totalItems` /
+//   `totalPages` field — civitai is cursor-based and does not disclose the
+//   full result count. Route wrappers therefore synthesise `total` as
+//   `(page-1)*pageSize + items.length + (hasMore ? 1 : 0)` to remain shaped
+//   as `PageEnvelope<T>`; callers treat `total` as a lower bound and trust
+//   `hasMore` for "is there a next page" decisions.
+//
+// When `query=` is present civitai REQUIRES cursor-based pagination and
+// rejects `page=` with `{"error":"Cannot use page param with query search.
+// Use cursor-based pagination."}`. Our `searchModels` helper therefore never
+// emits `page=` alongside `query=`.
 
 import { env } from '../../config/env.js';
 import { fetchWithRetry } from '../../lib/http.js';
@@ -14,6 +28,20 @@ export interface PageQuery {
 
 interface QueryParams {
   [key: string]: string | number | boolean;
+}
+
+/** Raw civitai metadata shape. `totalItems`/`totalPages` are NOT exposed. */
+export interface CivitaiMetadata {
+  currentPage?: number;
+  pageSize?: number;
+  nextCursor?: string;
+  nextPage?: string;
+  prevPage?: string;
+}
+
+export interface CivitaiListResponse {
+  items: unknown[];
+  metadata?: CivitaiMetadata;
 }
 
 function apiBase(): string { return env.CIVITAI_API_BASE; }
@@ -52,7 +80,7 @@ function pageParams(q: PageQuery, defaultLimit: number): QueryParams {
 }
 
 /** Latest models, sorted Newest. */
-export async function getLatestModels(q: PageQuery): Promise<unknown> {
+export async function getLatestModels(q: PageQuery): Promise<CivitaiListResponse> {
   const params: QueryParams = {
     ...pageParams(q, 12),
     sort: 'Newest',
@@ -60,11 +88,11 @@ export async function getLatestModels(q: PageQuery): Promise<unknown> {
     nsfw: false,
   };
   logger.info('civitai latest models', params);
-  return fetchJson(`${apiBase()}/models${encodeQuery(params)}`);
+  return (await fetchJson(`${apiBase()}/models${encodeQuery(params)}`)) as CivitaiListResponse;
 }
 
 /** Hot models, sorted by Most Downloaded last month. */
-export async function getHotModels(q: PageQuery): Promise<unknown> {
+export async function getHotModels(q: PageQuery): Promise<CivitaiListResponse> {
   const params: QueryParams = {
     ...pageParams(q, 24),
     sort: 'Most Downloaded',
@@ -72,7 +100,33 @@ export async function getHotModels(q: PageQuery): Promise<unknown> {
     nsfw: false,
   };
   logger.info('civitai hot models', params);
-  return fetchJson(`${apiBase()}/models${encodeQuery(params)}`);
+  return (await fetchJson(`${apiBase()}/models${encodeQuery(params)}`)) as CivitaiListResponse;
+}
+
+/**
+ * Free-text model search. Civitai rejects `page=` when `query=` is set (see
+ * file header), so this helper always passes a cursor when provided and
+ * otherwise omits the pagination token — the first hit returns `nextCursor`
+ * which subsequent calls thread through.
+ */
+export async function searchModels(
+  query: string,
+  q: PageQuery,
+): Promise<CivitaiListResponse> {
+  if (!query || query.trim().length === 0) {
+    throw new Error('Missing search query');
+  }
+  const limit = Number.isFinite(q.limit) ? Number(q.limit) : 24;
+  const params: QueryParams = {
+    limit,
+    query: query.trim(),
+    sort: 'Highest Rated',
+    period: 'AllTime',
+    nsfw: false,
+  };
+  if (q.cursor) params.cursor = q.cursor;
+  logger.info('civitai search models', { query, limit, cursor: q.cursor ?? null });
+  return (await fetchJson(`${apiBase()}/models${encodeQuery(params)}`)) as CivitaiListResponse;
 }
 
 /** Model details by ID. */
@@ -82,15 +136,43 @@ export async function getModelDetails(modelId: string): Promise<unknown> {
   return fetchJson(`${apiBase()}/models/${encodeURIComponent(modelId)}`);
 }
 
-/** Proxy the versionId -> download metadata endpoint. */
+/**
+ * Look up a model version and return the download URL + file metadata.
+ *
+ * Uses `/model-versions/:id` (JSON), not `/download/models/:id` (which is a
+ * 301 redirect to the binary file and returns HTML 404 for gated models).
+ */
 export async function getModelDownloadInfo(versionId: string): Promise<unknown> {
   if (!versionId) throw new Error('Missing model version ID');
   logger.info('civitai model download', { versionId });
-  return fetchJson(`${apiBase()}/download/models/${encodeURIComponent(versionId)}`);
+  const data = await fetchJson(`${apiBase()}/model-versions/${encodeURIComponent(versionId)}`);
+  const d = data as Record<string, unknown>;
+  const files = Array.isArray(d.files) ? d.files as Array<Record<string, unknown>> : [];
+  const primary = files.find((f) => f.primary === true) ?? files[0];
+  if (!primary) {
+    return {
+      versionId,
+      name: typeof d.name === 'string' ? d.name : '',
+      downloadUrl: null,
+      files: [],
+    };
+  }
+  return {
+    versionId,
+    name: typeof d.name === 'string' ? d.name : (typeof primary.name === 'string' ? primary.name : ''),
+    modelName: typeof primary.name === 'string' ? primary.name : '',
+    downloadUrl: typeof primary.downloadUrl === 'string' ? primary.downloadUrl : null,
+    sizeKB: typeof primary.sizeKB === 'number' ? primary.sizeKB : null,
+    type: typeof primary.type === 'string' ? primary.type : null,
+    format: typeof (primary.metadata as Record<string, unknown> | undefined)?.format === 'string'
+      ? ((primary.metadata as Record<string, unknown>).format as string)
+      : null,
+    files,
+  };
 }
 
 /** Pass-through by URL (frontend supplies its own pagination URL). */
-export async function getLatestModelsByUrl(fullUrl: string): Promise<unknown> {
+export async function getLatestModelsByUrl(fullUrl: string): Promise<CivitaiListResponse> {
   if (!fullUrl) throw new Error('Missing URL parameter');
   let parsed: URL;
   try { parsed = new URL(fullUrl); }
@@ -103,5 +185,5 @@ export async function getLatestModelsByUrl(fullUrl: string): Promise<unknown> {
   const params: QueryParams = {};
   parsed.searchParams.forEach((v, k) => { params[k] = v; });
   logger.info('civitai models by url', { params });
-  return fetchJson(`${apiBase()}/models${encodeQuery(params)}`);
+  return (await fetchJson(`${apiBase()}/models${encodeQuery(params)}`)) as CivitaiListResponse;
 }
