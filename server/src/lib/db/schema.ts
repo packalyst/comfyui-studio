@@ -1,10 +1,14 @@
 // SQL DDL for the single studio.db sqlite file.
 //
-// Tables: gallery, plugins_catalog, templates, template_models, template_plugins
-// plus a `schema_version` guard row so future migrations can inspect the
-// current version. Phase 10 bumps the version to 2 by appending the template
-// catalog + dep-graph tables (idempotent CREATE TABLE IF NOT EXISTS — v1 data
-// is untouched).
+// Tables: gallery, plugins_catalog, templates, template_models, template_plugins,
+// _meta (simple kv for one-shot migration flags) plus a `schema_version` guard
+// row so future migrations can inspect the current version. Phase 10 bumps the
+// version to 2 by appending the template catalog + dep-graph tables (idempotent
+// CREATE TABLE IF NOT EXISTS — v1 data is untouched).
+//
+// Wave F widens `gallery` with per-row generation metadata (workflowJson +
+// KSampler params). Columns are added via ALTER TABLE in `connection.ts` so
+// pre-existing rows keep working without a full rewrite.
 //
 // Indexes are deliberately scoped to the columns we sort or filter on in
 // routes (`createdAt`, `mediaType`, `templateName`, `promptId`, `title`,
@@ -18,6 +22,11 @@ CREATE TABLE IF NOT EXISTS schema_version (
   version INTEGER PRIMARY KEY
 );
 
+CREATE TABLE IF NOT EXISTS _meta (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS gallery (
   id          TEXT PRIMARY KEY,
   filename    TEXT NOT NULL,
@@ -28,7 +37,17 @@ CREATE TABLE IF NOT EXISTS gallery (
   promptId    TEXT,
   sizeBytes   INTEGER,
   url         TEXT,
-  type        TEXT NOT NULL DEFAULT 'output'
+  type        TEXT NOT NULL DEFAULT 'output',
+  workflowJson TEXT,
+  promptText   TEXT,
+  negativeText TEXT,
+  seed         INTEGER,
+  model        TEXT,
+  sampler      TEXT,
+  steps        INTEGER,
+  cfg          REAL,
+  width        INTEGER,
+  height       INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_gallery_createdAt ON gallery(createdAt DESC);
 CREATE INDEX IF NOT EXISTS idx_gallery_mediaType ON gallery(mediaType);

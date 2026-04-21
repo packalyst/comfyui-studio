@@ -52,7 +52,6 @@ snap history-single               "/api/history/${PROMPT_ID}"
 snap models                       /api/models
 snap gallery                      /api/gallery
 snap launcher-status              /api/launcher/status
-snap launcher-resource-packs      /api/launcher/resource-packs
 snap launcher-models              /api/launcher/models
 snap launcher-download-history    /api/launcher/models/download-history
 snap launcher-launch-options      /api/launcher/comfyui/launch-options

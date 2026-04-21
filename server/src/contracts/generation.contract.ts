@@ -10,6 +10,23 @@ export interface GalleryItem {
   mediaType: string;
   url: string;
   promptId: string;
+  /**
+   * Optional generation metadata captured at execution time from ComfyUI's
+   * history entry. Wave F adds these; rows written before Wave F have them
+   * all null/undefined. `workflowJson` is the full API-format workflow
+   * object stringified — required for the regenerate endpoint.
+   */
+  workflowJson?: string | null;
+  promptText?: string | null;
+  negativeText?: string | null;
+  seed?: number | null;
+  model?: string | null;
+  sampler?: string | null;
+  steps?: number | null;
+  cfg?: number | null;
+  width?: number | null;
+  height?: number | null;
+  templateName?: string | null;
 }
 
 /** One output row returned from `GET /api/history/:promptId`. */

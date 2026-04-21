@@ -3,7 +3,7 @@ import cors from 'cors';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import apiRouter from './routes/index.js';
-import { getComfyUIUrl, getQueue, getGalleryItems } from './services/comfyui.js';
+import { getComfyUIUrl, getQueue } from './services/comfyui.js';
 import * as galleryService from './services/gallery.service.js';
 import { loadTemplatesFromComfyUI } from './services/templates/index.js';
 import { wireTemplateEventHandlers } from './services/templates/eventSubscribers.js';
@@ -103,12 +103,14 @@ pollLauncherStatus();
 
 // Hook up downloads service so it can broadcast progress to all WS clients.
 setDownloadBroadcaster(broadcast);
+// Gallery mutations (delete, bulk-delete) broadcast a `gallery` message so
+// other tabs update their total + recents without polling.
+galleryService.setGalleryBroadcaster(broadcast);
 
 // ---- Queue & gallery broadcasts ----
 // Triggered by ComfyUI WS events. Debounced so bursts of messages (e.g. per-node
 // 'executed') collapse into one broadcast.
 let queueTimer: NodeJS.Timeout | null = null;
-let galleryTimer: NodeJS.Timeout | null = null;
 
 function scheduleQueueBroadcast() {
   if (queueTimer) return;
@@ -119,20 +121,6 @@ function scheduleQueueBroadcast() {
       broadcast({ type: 'queue', data: queue });
     } catch { /* ignore */ }
   }, 100);
-}
-
-function scheduleGalleryBroadcast() {
-  if (galleryTimer) return;
-  galleryTimer = setTimeout(async () => {
-    galleryTimer = null;
-    try {
-      // Persist new generations to sqlite in the same path that drives the
-      // WS broadcast so the next /gallery fetch reads hot data.
-      await galleryService.onGenerationComplete();
-      const items = await getGalleryItems();
-      broadcast({ type: 'gallery', data: { total: items.length, recent: items.slice(0, 8) } });
-    } catch { /* ignore */ }
-  }, 500);
 }
 
 // ---- Client WS: survives ComfyUI outages, retries upstream automatically ----
@@ -160,13 +148,25 @@ wss.on('connection', (clientWs) => {
       comfyWs.on('message', (data) => {
         const str = data.toString();
         if (clientWs.readyState === WebSocket.OPEN) clientWs.send(str);
-        // Trigger queue/gallery rebroadcast on relevant comfy events
+        // Trigger queue/gallery rebroadcast on relevant comfy events.
+        //
+        // Wave F: instead of rescanning ComfyUI's full /api/history on every
+        // 'executed' burst, we parse the prompt_id from the event payload
+        // and fetch just that single history entry to append. Multiple
+        // 'executed' messages (one per node) collapse because INSERT OR
+        // IGNORE no-ops on rows we already recorded.
         try {
-          const msg = JSON.parse(str);
+          const msg = JSON.parse(str) as {
+            type?: string;
+            data?: { prompt_id?: string };
+          };
           if (msg?.type === 'status') scheduleQueueBroadcast();
           else if (msg?.type === 'executed' || msg?.type === 'execution_complete') {
             scheduleQueueBroadcast();
-            scheduleGalleryBroadcast();
+            const promptId = msg?.data?.prompt_id;
+            if (typeof promptId === 'string' && promptId.length > 0) {
+              void galleryService.onExecutionComplete(promptId);
+            }
           }
         } catch { /* non-JSON */ }
       });

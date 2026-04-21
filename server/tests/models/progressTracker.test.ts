@@ -1,8 +1,8 @@
 // Unit tests for the per-task progress tracker.
 //
 // These assertions lock in the tracker's contract so downstream services
-// (`downloadController.service`, `essentialModels.service`, `models.service`)
-// can rely on the exact state transitions.
+// (`downloadController.service`, `models.service`) can rely on the exact
+// state transitions.
 
 import { describe, expect, it, beforeEach } from 'vitest';
 import * as tracker from '../../src/services/downloadController/progressTracker.js';

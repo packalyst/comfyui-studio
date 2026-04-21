@@ -1,9 +1,10 @@
 // Integration test — hit `GET /gallery` against a seeded sqlite DB.
 //
-// We mount only the gallery router on a throwaway Express app, bypass the
-// ComfyUI fetch (the service's `ensureSeeded` sees rows already > 0 and
-// skips the network call), and verify the response shape is identical to
-// Phase 8.
+// We mount only the gallery router on a throwaway Express app, pre-seed
+// the sqlite table via the repo, and verify the GET + DELETE response
+// shapes. Wave F removed the auto-seed-from-ComfyUI path, so the test
+// now simply asserts that routes serve the rows already in the DB
+// without touching the network at all.
 
 import { describe, expect, it, beforeEach } from 'vitest';
 import express from 'express';
@@ -14,6 +15,7 @@ import { useFreshDb } from '../lib/db/_helpers.js';
 
 function startApp(): Promise<{ url: string; close: () => Promise<void> }> {
   const app = express();
+  app.use(express.json());
   app.use(galleryRouter);
   return new Promise((resolve) => {
     const server = app.listen(0, () => {
@@ -30,7 +32,7 @@ describe('GET /gallery (sqlite-backed)', () => {
   useFreshDb();
 
   beforeEach(() => {
-    // Seed the DB so ensureSeeded is a no-op and the ComfyUI fetch is skipped.
+    // Seed the DB so the routes see rows without hitting ComfyUI.
     for (let i = 0; i < 7; i++) {
       repo.insert({
         id: `p-${i}.png`,
@@ -83,6 +85,61 @@ describe('GET /gallery (sqlite-backed)', () => {
       const body = await res.json() as { items: Array<{ mediaType: string }>; total: number };
       expect(body.total).toBe(4);
       expect(body.items.every(r => r.mediaType === 'image')).toBe(true);
+    } finally { await app.close(); }
+  });
+
+  it('DELETE /gallery/:id removes the sqlite row', async () => {
+    const app = await startApp();
+    try {
+      const res = await fetch(`${app.url}/gallery/p-0.png`, { method: 'DELETE' });
+      expect(res.status).toBe(200);
+      const body = await res.json() as { deleted: boolean; id: string };
+      expect(body.deleted).toBe(true);
+      expect(body.id).toBe('p-0.png');
+      expect(repo.count()).toBe(6);
+    } finally { await app.close(); }
+  });
+
+  it('DELETE /gallery/:id returns 404 for an unknown id', async () => {
+    const app = await startApp();
+    try {
+      const res = await fetch(`${app.url}/gallery/does-not-exist`, { method: 'DELETE' });
+      expect(res.status).toBe(404);
+      const body = await res.json() as { deleted: boolean };
+      expect(body.deleted).toBe(false);
+      expect(repo.count()).toBe(7);
+    } finally { await app.close(); }
+  });
+
+  it('DELETE /gallery with ids body bulk-deletes', async () => {
+    const app = await startApp();
+    try {
+      const res = await fetch(`${app.url}/gallery`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: ['p-0.png', 'p-1.png', 'missing'] }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json() as {
+        deleted: number; requested: number;
+        results: Array<{ id: string; removed: boolean }>;
+      };
+      expect(body.deleted).toBe(2);
+      expect(body.requested).toBe(3);
+      expect(body.results.find(r => r.id === 'missing')?.removed).toBe(false);
+      expect(repo.count()).toBe(5);
+    } finally { await app.close(); }
+  });
+
+  it('DELETE /gallery rejects empty body', async () => {
+    const app = await startApp();
+    try {
+      const res = await fetch(`${app.url}/gallery`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: [] }),
+      });
+      expect(res.status).toBe(400);
     } finally { await app.close(); }
   });
 });

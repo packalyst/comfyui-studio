@@ -19,6 +19,7 @@ import { logger } from '../../lib/logger.js';
 import { env } from '../../config/env.js';
 import * as templateRepo from '../../lib/db/templates.repo.js';
 import { extractDeps } from './depExtract.js';
+import { extractDepsWithPluginResolution, resolutionsToRepoKeys } from './extractDepsAsync.js';
 import { loadTemplatesFromComfyUI, getTemplates } from './templates.service.js';
 import { recomputeReadinessFor } from './readiness.js';
 import { isUserWorkflow } from './userTemplates.js';
@@ -74,11 +75,28 @@ function hasChanged(
   return false;
 }
 
-function toRefreshRow(t: TemplateData, workflow: unknown): ComputedEntry {
+async function toRefreshRow(t: TemplateData, workflow: unknown): Promise<ComputedEntry> {
   // `extractDeps` produces real filenames; the index's `t.models` shorthand
   // returns family tags ("Qwen-Image-Edit", "Wan") that never match installed
   // files and would poison readiness. Drop the merge.
-  const deps = extractDeps(workflow);
+  //
+  // Plugin edges: the full async extractor unions aux_id/cnr_id hits with
+  // Manager-resolved class_type matches. `resolutionsToRepoKeys` collapses
+  // the detailed match objects into the `owner/repo` string form stored in
+  // `template_plugins` — readiness queries + install-missing use that form.
+  // Manager-offline degrades to the aux_id cheap path automatically.
+  let pluginRepoKeys: string[];
+  try {
+    const resolved = await extractDepsWithPluginResolution(workflow);
+    pluginRepoKeys = resolutionsToRepoKeys(resolved.plugins);
+  } catch (err) {
+    logger.warn('template refresh: plugin resolution failed', {
+      name: t.name, error: err instanceof Error ? err.message : String(err),
+    });
+    pluginRepoKeys = extractDeps(workflow).plugins;
+  }
+  const cheap = extractDeps(workflow);
+  const deps = { models: cheap.models, plugins: pluginRepoKeys };
   return {
     name: t.name,
     row: {
@@ -119,7 +137,7 @@ export async function refreshTemplates(): Promise<RefreshResult> {
       const my = idx++;
       const t = fresh[my];
       const wf = await fetchWorkflow(t.name);
-      computed.push(toRefreshRow(t, wf));
+      computed.push(await toRefreshRow(t, wf));
     }
   }
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, fresh.length) }, worker));

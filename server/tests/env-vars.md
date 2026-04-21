@@ -17,6 +17,9 @@ instead of `process.env.*`.
 | `STUDIO_EXPOSED_WIDGETS_DIR`    | `~/.config/comfyui-studio/exposed_widgets`                 | `src/services/exposedWidgets.ts`                      | Directory of per-template exposed-widget records |
 | `STUDIO_SQLITE_PATH`            | `~/.config/comfyui-studio/runtime/studio.db`               | `src/lib/db/connection.ts`                            | Single sqlite DB file backing gallery + plugin catalog queries |
 | `NODE_ENV`                      | `development`                                              | (new) `src/middleware/errors.ts`                      | Used by error middleware to gate stack-trace leaks |
+| `GITHUB_TOKEN`                  | `''`                                                       | `src/services/templates/importRemote.ts`              | Optional; when set, bumps the import-from-github rate limit from 60/h (anon) to 5000/h (authed). |
+| `HUGGINGFACE_TOKEN`             | `''`                                                       | `src/services/models/resolveHuggingface.ts`           | Optional; attached as `Authorization: Bearer` on HF HEAD requests from the import "Resolve via URL" flow (Wave E). |
+| `CIVITAI_TOKEN`                 | `''`                                                       | `src/services/models/resolveCivitai.ts`, `src/services/settings.ts` | Optional; forwarded to the CivitAI REST API from the import "Resolve via URL" flow. Settings-level override wins when present. |
 
 Any NEW env access must be added both to the table above and to the typed
 `env` export in `src/config/env.ts` — the repo enforces this with the lint

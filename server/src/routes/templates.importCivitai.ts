@@ -22,21 +22,18 @@ function resolveVersionId(body: unknown): string {
   return raw != null ? String(raw) : '';
 }
 
-function looksLikeLitegraph(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== 'object') return false;
-  const nodes = (value as { nodes?: unknown }).nodes;
-  if (!Array.isArray(nodes)) return false;
-  return nodes.length === 0 || (typeof nodes[0] === 'object' && nodes[0] !== null);
-}
+// Re-export the shared guard — kept as a local alias so callers in this file
+// read naturally. Source of truth lives in `services/templates/importStaging.ts`.
+const looksLikeLitegraph = templates.looksLikeLitegraph;
 
 /**
- * Walk the zip's entries and return the largest JSON file whose contents parse
- * as a LiteGraph workflow document. Ignores directories, non-JSON files, and
- * JSON that isn't shaped like a workflow.
+ * Walk the zip's entries and classify LiteGraph-shaped JSON files. Returns
+ * every candidate — callers decide whether to auto-commit the largest (single
+ * workflow, back-compat) or hand the zip to the staging pipeline (multi).
  */
-async function pickWorkflowFromZip(
+async function scanZipForWorkflows(
   zipBytes: ArrayBuffer,
-): Promise<{ workflow: Record<string, unknown>; entryName: string } | { rejected: string[] }> {
+): Promise<{ all: string[]; candidates: Array<{ name: string; size: number; workflow: Record<string, unknown> }> }> {
   const zip = await JSZip.loadAsync(zipBytes);
   const candidates: Array<{ name: string; size: number; workflow: Record<string, unknown> }> = [];
   const allNames: string[] = [];
@@ -50,10 +47,7 @@ async function pickWorkflowFromZip(
     if (!looksLikeLitegraph(parsed)) continue;
     candidates.push({ name, size: text.length, workflow: parsed });
   }
-  if (candidates.length === 0) return { rejected: allNames };
-  // Largest wins — usually the full workflow, smaller JSONs are meta/preview.
-  candidates.sort((a, b) => b.size - a.size);
-  return { workflow: candidates[0].workflow, entryName: candidates[0].name };
+  return { all: allNames, candidates };
 }
 
 async function fetchRemoteBytes(
@@ -147,8 +141,8 @@ export async function handleImportCivitai(req: Request, res: Response): Promise<
         });
         return;
       }
-      let result;
-      try { result = await pickWorkflowFromZip(zipBytes); }
+      let scan: { all: string[]; candidates: Array<{ name: string; size: number; workflow: Record<string, unknown> }> };
+      try { scan = await scanZipForWorkflows(zipBytes); }
       catch (err) {
         res.status(400).json({
           error: `Zip archive could not be opened: ${err instanceof Error ? err.message : String(err)}`,
@@ -156,23 +150,44 @@ export async function handleImportCivitai(req: Request, res: Response): Promise<
         });
         return;
       }
-      if ('rejected' in result) {
+      if (scan.candidates.length === 0) {
         res.status(415).json({
           error: 'No LiteGraph workflow JSON found inside the zip.',
           fileName: meta.fileName,
-          entries: result.rejected.slice(0, 50),
+          entries: scan.all.slice(0, 50),
         });
         return;
       }
-      workflowDoc = result.workflow;
+      // Multi-workflow zips go through the staging pipeline so the user can
+      // pick which workflow(s) to import. Single-JSON zips keep the
+      // back-compat one-click behavior.
+      if (scan.candidates.length > 1) {
+        const sourceUrl = `https://civitai.com/models/${meta.modelId ?? ''}?modelVersionId=${versionId}`;
+        const staged = await templates.stageFromZip(zipBytes, {
+          source: 'civitai',
+          sourceUrl,
+          defaultTitle: meta.modelName || `CivitAI Workflow ${versionId}`,
+          defaultDescription: `Imported from civitai.com (model version ${versionId}).`,
+        });
+        res.json({ staged: true, manifest: templates.toManifest(staged) });
+        return;
+      }
+      workflowDoc = scan.candidates[0].workflow;
     }
 
+    const io = templates.extractWorkflowIo(workflowDoc);
+    const mediaType = templates.deriveMediaType(io);
+    const deps = templates.extractDeps(workflowDoc);
     const saved = templates.saveUserWorkflow({
       name: meta.modelName || `civitai-${versionId}`,
       title: meta.modelName || `CivitAI Workflow ${versionId}`,
       description: `Imported from civitai.com (model version ${versionId}).`,
       workflow: workflowDoc,
       sourceUrl: `https://civitai.com/models/${meta.modelId ?? ''}?modelVersionId=${versionId}`,
+      io,
+      mediaType,
+      studioCategory: templates.mediaTypeToStudioCategory(mediaType),
+      models: deps.models,
     });
 
     try { await templates.refreshTemplates(); }

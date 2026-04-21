@@ -46,6 +46,26 @@ export async function getHistory(maxItems = 50) {
   return fetchComfyUI(`/api/history?max_items=${maxItems}`);
 }
 
+/**
+ * Fetch one entry from `/api/history/:promptId`. ComfyUI returns a
+ * `{ [promptId]: { prompt, outputs, status, ... } }` shape even for the
+ * single-id endpoint, so we unwrap to the inner entry here. Returns null
+ * when the id is unknown to ComfyUI (history entries age out after a
+ * server restart).
+ */
+export async function getHistoryForPrompt(
+  promptId: string,
+): Promise<{
+  prompt?: unknown;
+  outputs?: Record<string, Record<string, unknown>>;
+} | null> {
+  const data = await fetchComfyUI<Record<string, {
+    prompt?: unknown;
+    outputs?: Record<string, Record<string, unknown>>;
+  }>>(`/api/history/${promptId}`);
+  return data[promptId] ?? null;
+}
+
 export async function submitPrompt(
   workflow: Record<string, unknown>,
   opts?: { attachApiKey?: boolean },

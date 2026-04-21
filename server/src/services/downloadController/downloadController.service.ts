@@ -1,4 +1,4 @@
-// Shared download orchestrator. Used by models + essentialModels services.
+// Shared download orchestrator. Used by the models service.
 //
 // Responsibilities:
 // - Drive `lib/download.downloadFile` with the engine's `DownloadOptions`.

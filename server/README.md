@@ -25,9 +25,8 @@ src/
     plugins/                   # install/uninstall/enable/disable/history/switchVersion
     python/                    # pip packages, plugin dep audit
     civitai/                   # model + workflow search + proxy
-    resourcePacks/             # recipe installer
     systemLauncher/            # pip/HF/GH config writes, network checks, open-path
-    essentialModels/           # bundled SDXL + VAE + upscalers batch install
+    essentialModels/           # bundled SDXL + VAE + upscalers seed list (merged into /api/models)
     downloadController/        # shared download orchestrator (queue, progress)
     templates/                 # template loader + mutations
     workflow/                  # UI-to-API prompt conversion, flattening, widgets
@@ -121,7 +120,7 @@ not contacted, and does not need to be running.
 | `CIVITAI_API_BASE`             | `https://civitai.com/api/v1`                       | CivitAI endpoint |
 
 See `src/config/env.ts` for the full set (system-bridge, retry policy,
-resource-pack retries, CLI defaults, etc.).
+CLI defaults, etc.).
 
 ## Testing
 

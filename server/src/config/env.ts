@@ -120,6 +120,20 @@ const LAUNCHER = {
   CIVITAI_MAX_RESPONSE_BYTES: readNumber(process.env.CIVITAI_MAX_RESPONSE_BYTES, 10 * 1024 * 1024),
   /** CivitAI API token seed (optional). Persisted via `settings.civitaiToken` takes precedence. */
   CIVITAI_TOKEN: process.env.CIVITAI_TOKEN ?? '',
+  /**
+   * Optional GitHub API token. When set, `Authorization: Bearer <token>` is
+   * attached to calls to api.github.com so the import-from-github flow gets
+   * the authenticated 5000/h rate limit instead of the unauth 60/h. Never
+   * forwarded to the client.
+   */
+  GITHUB_TOKEN: process.env.GITHUB_TOKEN ?? '',
+  /**
+   * Optional HuggingFace API token. When set, `Authorization: Bearer <token>`
+   * is attached to calls against huggingface.co by the HF URL resolver so we
+   * can HEAD private or size-redirected files. Public endpoints keep working
+   * without it. Never forwarded to the client.
+   */
+  HUGGINGFACE_TOKEN: process.env.HUGGINGFACE_TOKEN ?? '',
 } as const;
 
 export const env = { ...STUDIO, ...LAUNCHER } as const;

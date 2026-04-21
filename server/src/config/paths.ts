@@ -7,9 +7,8 @@
 // Three roots, each with a clear purpose — do NOT cross streams:
 //
 //   1. BUNDLED_DATA_DIR (`server/data/`) — bundled READ-ONLY seeds shipped
-//      with the image (e.g. `all_nodes.mirrored.json`, `model-list.json`,
-//      `resource-packs/*.json`). Overwritten on image rebuilds. Services
-//      must never write here.
+//      with the image (e.g. `all_nodes.mirrored.json`, `model-list.json`).
+//      Overwritten on image rebuilds. Services must never write here.
 //
 //   2. STUDIO_CONFIG_ROOT (`~/.config/comfyui-studio/`) — user config that
 //      the operator may hand-edit (catalog, config, pip.conf, widgets).
@@ -47,8 +46,8 @@ export const paths = {
   modelsDir: env.MODELS_DIR,
   /**
    * Directory holding bundled READ-ONLY seeds (all_nodes.mirrored.json,
-   * model-list.json, resource-packs/). Do NOT write here — use the named
-   * runtime-state paths below for mutable JSON.
+   * model-list.json). Do NOT write here — use the named runtime-state paths
+   * below for mutable JSON.
    */
   dataDir: env.DATA_DIR || BUNDLED_DATA_DIR,
   /** Bundled plugin-catalog snapshot (tracked, read-only). */

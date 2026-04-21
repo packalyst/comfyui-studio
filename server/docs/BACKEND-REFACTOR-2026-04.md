@@ -10,7 +10,7 @@ agents (A through L): the original structural phases (A-E), the launcher cutover
 |-------------------------------|----------------------------|--------------------------------|---------------------------|
 | Total `.ts` files under src   | ~9 monolithic              | 60 focused                     | 141 focused               |
 | Total LOC (src)               | ~5400                      | 5009                           | 13,425                    |
-| Largest file                  | `src/routes/api.ts` ~1600+ | `src/services/catalog.ts` 244  | `essentialModels.data.ts` 234 |
+| Largest file                  | `src/routes/api.ts` ~1600+ | `src/services/catalog.ts` 244  | (see structure.test cap: 250) |
 | Files over 250 lines          | several                    | 0                              | 0                         |
 | Functions over 50 lines       | many                       | 0 flagged                      | 4 flagged (soft)          |
 | Vitest tests                  | 0                          | 76                             | 244 (33 files)            |
@@ -74,11 +74,13 @@ endpoints into studio itself.
   (`COMFYUI_PATH`, `DATA_DIR`, retry tuning, etc.) in `config/env.ts`.
 
 - **Agent G — models + downloads.** Ported `/api/models/*` (list, scan,
-  delete, install, progress, history, download-custom) and
-  `/api/models/essential*` (batch install of the bundled SDXL+VAE+upscaler
-  list). Introduced `services/downloadController/` — the shared queue /
-  progress / broadcaster hookup used by models, essentialModels, and
-  resourcePacks. Added SSRF guard on `download-custom` (literal hostname).
+  delete, install, progress, history, download-custom). Introduced
+  `services/downloadController/` — the shared queue / progress /
+  broadcaster hookup used by the models service. Added SSRF guard on
+  `download-custom` (literal hostname). The essential-models batch routes
+  and the resource-pack routes shipped with this port were later removed
+  as dead code (no frontend consumers); the essential-model seed list is
+  still merged into `/api/models/*` responses.
 
 - **Agent H — ComfyUI lifecycle.** Ported `/status`, `/start`, `/stop`,
   `/restart`, `/comfyui/logs`, `/comfyui/reset`, `/comfyui/launch-options`,
@@ -90,9 +92,10 @@ endpoints into studio itself.
 - **Agent I — plugins + python + civitai + resource-packs.** Ported the 24
   plugins endpoints (install, uninstall, enable/disable, switch-version,
   history, custom install with URL allow-list), 7 python endpoints (pip
-  source, packages list/install/uninstall, plugin deps), 7 civitai endpoints
-  (search, by-url, latest, hot, details, proxied download), and 5
-  resource-pack endpoints (list, detail, install, progress, cancel).
+  source, packages list/install/uninstall, plugin deps), and 7 civitai
+  endpoints (search, by-url, latest, hot, details, proxied download). The
+  5 resource-pack endpoints originally ported in this agent were later
+  removed as dead code (no frontend consumers).
 
 - **Agent J — system controller.** Ported the 9 system endpoints
   (`network-status`, `network-config`, `pip-source`, `huggingface-endpoint`,
@@ -260,9 +263,9 @@ During phases 6-11 the following were removed as dead or duplicate:
 | D (9-10)| security hardening                              | SSRF, upload filters, secret redaction        |
 | E (11)  | polish + docs                                   | `sendError`, structure.test.ts, README        |
 | F       | launcher-port scaffolding                       | `lib/exec`, `lib/download`, shared hub        |
-| G       | models + essential-models port                  | 15 endpoints local, download controller       |
+| G       | models port (+ essential-models, later removed) | 10 endpoints local, download controller       |
 | H       | ComfyUI lifecycle port                          | 10 endpoints local, reverse proxy             |
-| I       | plugins / python / civitai / resource-packs     | 33 endpoints local, URL allow-list            |
+| I       | plugins / python / civitai (+ resource-packs, later removed) | 28 endpoints local, URL allow-list |
 | J       | system configurator + liveSettings              | 9 endpoints local, runtime env mirror         |
 | K       | cutover                                         | `/launcher/*` catch-all + `LAUNCHER_URL` gone |
 | L       | final audit                                     | invariants verified, docs finalized           |
@@ -284,17 +287,15 @@ During phases 6-11 the following were removed as dead or duplicate:
 | generate               | generate.routes.ts            | 1        | 0            |
 | dependencies           | dependencies.routes.ts        | 1        | 0            |
 | models                 | models.routes.ts              | 10       | 10           |
-| essential models       | essentialModels.routes.ts     | 5        | 5            |
 | ComfyUI lifecycle      | comfyui.routes.ts             | 10       | 10           |
 | plugins                | plugins.routes.ts             | 14       | 14           |
 | python                 | python.routes.ts              | 7        | 7            |
 | civitai                | civitai.routes.ts             | 7        | 7            |
-| resource packs         | resourcePacks.routes.ts       | 5        | 5            |
 | system (configurator)  | systemLauncher.routes.ts      | 9        | 9            |
-| **total**              |                               | **93**   | **67**       |
+| **total**              |                               | **83**   | **57**       |
 
 Studio-native only (no `/launcher/` alias): 26 handlers across the first 12
-rows. The remaining 67 are dual-mounted for frontend back-compat.
+rows. The remaining 57 are dual-mounted for frontend back-compat.
 
 ## Architecture (final)
 
@@ -314,9 +315,8 @@ server/src
     ├── plugins/                  # install/uninstall/switch/cache/history + toml
     ├── python/                   # pip + package + plugin deps
     ├── civitai/                  # models + workflows
-    ├── resourcePacks/            # list/install + base/model/workflow/custom installers
     ├── systemLauncher/           # configurator + networkChecker/
-    ├── essentialModels/          # data + batch service
+    ├── essentialModels/          # bundled seed list (merged into /api/models)
     └── downloadController/       # queue, progress, history (shared)
 ```
 
@@ -349,11 +349,9 @@ server/src
 | Models install URL priority (hf/mirror/cdn)          | tests/models/install.urlSelection.test.ts + download.urlPriority.test.ts |
 | Download controller: progress + cancel               | tests/models/downloadController.test.ts |
 | Progress tracker lifecycle                           | tests/models/progressTracker.test.ts    |
-| Essential batch progress                             | tests/models/essentialModels.test.ts    |
 | Plugin install: URL allow-list + steps + TOML parse  | tests/plugins/install.test.ts + toml.test.ts |
 | Plugin history + progress                            | tests/plugins/history.test.ts + progress.test.ts |
 | Python requirement compatibility                     | tests/python/pip.test.ts                |
-| Resource pack installer                              | tests/resourcePacks/installer.test.ts   |
 | ComfyUI launch-options CLI build                     | tests/comfyui/launchOptions.test.ts     |
 | ComfyUI log tail, status, process lifecycle          | tests/comfyui/{logTail,status,process}.test.ts |
 | CivitAI validation                                   | tests/civitai/validation.test.ts        |
@@ -364,8 +362,6 @@ server/src
   loses locality.
 - `services/comfyui/htmlGenerator.ts::getNotRunningHtml` (57 lines) — inlined
   HTML template literal; the body is data, not logic.
-- `services/resourcePacks/baseInstaller.ts::tryDownloadWithFallbacks` (52
-  lines) — URL-by-URL fallback loop with cancel/cleanup.
 - `services/templates/templates.service.ts::loadTemplatesFromComfyUI` (51
   lines) — `for..for` mapper over category / template trees.
 

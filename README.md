@@ -6,12 +6,11 @@ the upstream `beclab/comfyui` image.
 ## Layout
 
 ```
-src/                 # studio frontend (Vite + React)
-server/              # studio backend (Express, WebSocket, proxies)
-launcher-backend/    # launcher (Koa) — model downloads, ComfyUI lifecycle
+ui/                  # studio frontend (self-contained: Vite + React + its own package.json/tsconfig/node_modules)
+server/              # studio backend (self-contained: Express, WebSocket, proxies)
 docker/              # container entrypoint
 .github/workflows/   # image build + push (GHCR)
-Dockerfile           # extend beclab image with our launcher + studio
+Dockerfile           # extend beclab image with our backend + UI
 .local/              # scratch / reference (gitignored)
 ```
 

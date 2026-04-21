@@ -1,8 +1,8 @@
 // liveSettings in-memory accessor contract. Covers:
 //  - seed-from-env at import time
 //  - setters propagate to getters (in-memory mutation)
-//  - consumers in plugins/install + models/download + resourcePacks/downloadUrls
-//    now read through the live accessors.
+//  - consumers in plugins/install + models/download now read through the live
+//    accessors.
 
 import { describe, expect, it, beforeEach } from 'vitest';
 
@@ -85,13 +85,6 @@ describe('liveSettings consumer delegation', () => {
     liveSettings.setHfEndpoint('https://new-hf.example.com/');
     const rewritten = mod.processHfEndpoint('https://huggingface.co/foo/bar');
     expect(rewritten).toBe('https://new-hf.example.com/foo/bar');
-  });
-
-  it('resourcePacks/downloadUrls.processHfEndpoint reads through liveSettings', async () => {
-    const mod = await import('../../src/services/resourcePacks/downloadUrls.js');
-    liveSettings.setHfEndpoint('https://other-hf.example.com/');
-    const rewritten = mod.processHfEndpoint('https://huggingface.co/a/b');
-    expect(rewritten).toBe('https://other-hf.example.com/a/b');
   });
 
   it('plugins/install.resolveProxy indirection compiles (shape check only)', async () => {

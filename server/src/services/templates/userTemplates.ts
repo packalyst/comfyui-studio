@@ -16,7 +16,7 @@ import { atomicWrite, safeResolve } from '../../lib/fs.js';
 import { paths } from '../../config/paths.js';
 import { logger } from '../../lib/logger.js';
 import { generateFormInputs } from './templates.formInputs.js';
-import type { TemplateData, RawTemplate } from './types.js';
+import type { TemplateData, RawTemplate, TemplatePluginEntry } from './types.js';
 
 const DIR = (): string => paths.userTemplatesDir;
 
@@ -53,37 +53,64 @@ export interface SaveWorkflowInput {
   sourceUrl?: string;
   tags?: string[];
   category?: string;
+  /**
+   * Pre-extracted io.inputs/outputs. When omitted, the template lands with
+   * an empty io block and the form-inputs generator falls back to a generic
+   * prompt (back-compat with single-JSON civitai imports).
+   */
+  io?: TemplateData['io'];
+  /** Derived media type (SaveImage→image, SaveVideo→video, ...). Defaults to 'image'. */
+  mediaType?: string;
+  /** Studio sidebar bucket. Defaults to 'image'. */
+  studioCategory?: TemplateData['studioCategory'];
+  /** Model filenames the workflow depends on — prepopulates TemplateData.models. */
+  models?: string[];
+  /**
+   * Resolved plugin requirements (Phase 2). Persisted into TemplateData so
+   * the Explore card + Studio page can surface "N plugins missing" without
+   * re-running the Manager lookup on every render.
+   */
+  plugins?: TemplatePluginEntry[];
+  /**
+   * Optional thumbnail URL(s). When set, the first entry is used as the
+   * card preview (via the existing `template.thumbnail[0]` render).
+   */
+  thumbnail?: string[];
 }
 
 export function saveUserWorkflow(input: SaveWorkflowInput): TemplateData {
   ensureDir();
   const slug = slugifyTemplateName(input.name);
 
+  const mediaType = input.mediaType || 'image';
   // The form-inputs generator works off a RawTemplate shape. Synthesise one
-  // from the little we know; the workflow itself carries the node metadata
-  // required to wire up advanced widgets.
+  // from the inputs we have — including any pre-extracted io.inputs — so
+  // user-imported templates get the same image/video/audio upload fields
+  // as upstream ComfyUI templates with the same shape.
   const raw: RawTemplate = {
     name: slug,
     title: input.title || slug,
     description: input.description || '',
-    mediaType: 'image',
+    mediaType,
     tags: input.tags || [],
-    models: [],
+    models: input.models || [],
     date: new Date().toISOString(),
     openSource: true,
+    io: input.io,
   };
   const data: TemplateData = {
     name: slug,
     title: raw.title,
     description: raw.description,
-    mediaType: raw.mediaType,
+    mediaType,
     tags: raw.tags ?? [],
-    models: [],
+    models: input.models ?? [],
+    plugins: input.plugins,
     category: input.category || 'User Workflows',
-    studioCategory: 'image',
-    io: { inputs: [], outputs: [] },
+    studioCategory: input.studioCategory ?? 'image',
+    io: input.io ?? { inputs: [], outputs: [] },
     formInputs: generateFormInputs(raw),
-    thumbnail: [],
+    thumbnail: input.thumbnail ?? [],
     workflow: input.workflow,
     size: 0,
     vram: 0,

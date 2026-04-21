@@ -92,6 +92,9 @@ router.get('/templates', async (req: Request, res: Response) => {
   let rows = attachReady(result);
   if (source === 'open') rows = rows.filter((t) => t.openSource !== false);
   else if (source === 'api') rows = rows.filter((t) => t.openSource === false);
+  // `source=user` keeps only user-imported workflows — the marker is the
+  // category label assigned by `saveUserWorkflow`.
+  else if (source === 'user') rows = rows.filter((t) => t.category === 'User Workflows');
   if (category && category !== 'All') {
     rows = rows.filter((t) => t.category === category);
   }
@@ -168,6 +171,27 @@ router.post('/templates/import-civitai', handleImportCivitai);
 router.post('/launcher/templates/import-civitai', handleImportCivitai);
 router.delete('/templates/:name', handleDeleteTemplate);
 router.delete('/launcher/templates/:name', handleDeleteTemplate);
+
+// Queue installs for every plugin the template requires that isn't already
+// on disk. Returns the task ids so the UI can subscribe to
+// `/plugins/progress/:taskId` for each one. See
+// `server/src/services/templates/installMissingPlugins.ts`.
+const handleInstallMissingPlugins = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const name = req.params.name as string;
+    const result = await templates.installMissingPluginsForTemplate(name);
+    res.json(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/not found/i.test(msg)) {
+      res.status(404).json({ error: msg });
+      return;
+    }
+    sendError(res, err, 500, 'Install missing plugins failed');
+  }
+};
+router.post('/templates/:name/install-missing-plugins', handleInstallMissingPlugins);
+router.post('/launcher/templates/:name/install-missing-plugins', handleInstallMissingPlugins);
 
 // Raw workflow JSON proxy for clients that want to inspect the template's
 // underlying LiteGraph document. User-imported workflows are served from

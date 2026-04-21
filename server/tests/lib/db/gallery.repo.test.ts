@@ -69,14 +69,15 @@ describe('gallery repo', () => {
     expect(new Set(allIds).size).toBe(15);
   });
 
-  it('rebuildFromScan bulk-upserts idempotently', () => {
-    const rows = Array.from({ length: 10 }, (_, i) =>
+  it('appendFromHistory inserts new rows and returns true; duplicates return false', () => {
+    const rows = Array.from({ length: 5 }, (_, i) =>
       mkRow({ id: `b${i}`, filename: `b${i}.png`, createdAt: i }),
     );
-    expect(repo.rebuildFromScan(rows)).toBe(10);
-    // Running the same batch again should not duplicate.
-    repo.rebuildFromScan(rows);
-    expect(repo.count()).toBe(10);
+    for (const row of rows) expect(repo.appendFromHistory(row)).toBe(true);
+    // Running the same batch again: every id already exists, OR IGNORE
+    // no-ops, so every call returns false.
+    for (const row of rows) expect(repo.appendFromHistory(row)).toBe(false);
+    expect(repo.count()).toBe(5);
   });
 
   it('sort=oldest reverses order', () => {

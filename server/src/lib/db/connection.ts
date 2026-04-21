@@ -40,6 +40,49 @@ function resolveDbPath(): string {
   return abs;
 }
 
+/**
+ * Idempotent additive migration for the Wave F gallery metadata columns.
+ * Pre-existing databases were created before `workflowJson` / prompt /
+ * sampler fields existed; the CREATE TABLE above only runs on a fresh file,
+ * so we ALTER-TABLE-ADD-COLUMN any missing ones here. `PRAGMA table_info`
+ * is the canonical way to introspect sqlite columns.
+ *
+ * After the columns are in place, we do a one-shot wipe of the gallery
+ * table to clear "zombie" rows resurrected by the pre-Wave-F rescan bug.
+ * The one-shot flag lives in `_meta` so subsequent boots skip it.
+ */
+function applyGalleryWaveFMigration(db: DB): void {
+  const cols = db.prepare('PRAGMA table_info(gallery)').all() as
+    Array<{ name: string }>;
+  const present = new Set(cols.map(c => c.name));
+  const needed: Array<{ name: string; decl: string }> = [
+    { name: 'workflowJson', decl: 'TEXT' },
+    { name: 'promptText',   decl: 'TEXT' },
+    { name: 'negativeText', decl: 'TEXT' },
+    { name: 'seed',         decl: 'INTEGER' },
+    { name: 'model',        decl: 'TEXT' },
+    { name: 'sampler',      decl: 'TEXT' },
+    { name: 'steps',        decl: 'INTEGER' },
+    { name: 'cfg',          decl: 'REAL' },
+    { name: 'width',        decl: 'INTEGER' },
+    { name: 'height',       decl: 'INTEGER' },
+  ];
+  for (const col of needed) {
+    if (!present.has(col.name)) {
+      db.exec(`ALTER TABLE gallery ADD COLUMN ${col.name} ${col.decl}`);
+    }
+  }
+  // One-shot wipe of pre-migration "zombie" rows. Guarded on _meta so we
+  // never re-run this on subsequent boots.
+  const flag = db.prepare('SELECT v FROM _meta WHERE k = ?')
+    .get('gallery_wave_f_reset') as { v: string } | undefined;
+  if (!flag) {
+    db.exec('DELETE FROM gallery');
+    db.prepare('INSERT INTO _meta (k, v) VALUES (?, ?)')
+      .run('gallery_wave_f_reset', 'done');
+  }
+}
+
 function openAndInit(dbPath: string): DB {
   const db = new Database(dbPath);
   // WAL: many readers + single writer, durable across crashes, and the
@@ -48,6 +91,7 @@ function openAndInit(dbPath: string): DB {
   db.pragma('synchronous = NORMAL');
   db.pragma('foreign_keys = ON');
   db.exec(SCHEMA_SQL);
+  applyGalleryWaveFMigration(db);
   const row = db.prepare('SELECT version FROM schema_version LIMIT 1').get() as
     | { version: number } | undefined;
   if (!row) {

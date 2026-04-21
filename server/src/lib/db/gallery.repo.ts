@@ -1,9 +1,10 @@
 // Gallery repository. Backs `GET /gallery` and the generation-complete hook.
 //
 // Rows are keyed on `<promptId>-<filename>` to match the existing id scheme
-// from `getGalleryItems()` — this keeps bulk seeding idempotent (the same
-// history row re-scanned twice doesn't duplicate) and lets the broadcast
-// loop call `upsertMany` without tracking what's new.
+// from `getGalleryItems()` — this keeps per-execution appends idempotent
+// (the same prompt/file pair processed twice won't duplicate) and lets the
+// event-driven path use `INSERT OR IGNORE` so a user-deleted row never
+// resurrects from a stale ComfyUI history entry.
 //
 // Every query is a prepared statement; parameters are positional so the
 // driver escapes them — never string-concatenate into SQL here.
@@ -14,13 +15,23 @@ import { getDb } from './connection.js';
 
 export interface GalleryRow extends GalleryItem {
   createdAt: number;
-  templateName?: string;
-  sizeBytes?: number;
+  templateName?: string | null;
+  sizeBytes?: number | null;
 }
 
 export interface GalleryListFilter {
   mediaType?: string;           // 'all' or '' = no filter
   sort?: 'newest' | 'oldest';   // default newest
+}
+
+function nullableNumber(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+function nullableString(v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  return typeof v === 'string' ? v : String(v);
 }
 
 function rowToItem(r: Record<string, unknown>): GalleryItem {
@@ -32,6 +43,17 @@ function rowToItem(r: Record<string, unknown>): GalleryItem {
     mediaType: String(r.mediaType),
     url: String(r.url ?? ''),
     promptId: String(r.promptId ?? ''),
+    templateName: nullableString(r.templateName),
+    workflowJson: nullableString(r.workflowJson),
+    promptText:   nullableString(r.promptText),
+    negativeText: nullableString(r.negativeText),
+    seed:   nullableNumber(r.seed),
+    model:  nullableString(r.model),
+    sampler: nullableString(r.sampler),
+    steps:  nullableNumber(r.steps),
+    cfg:    nullableNumber(r.cfg),
+    width:  nullableNumber(r.width),
+    height: nullableNumber(r.height),
   };
 }
 
@@ -39,13 +61,50 @@ export function insert(item: GalleryRow, db: Database.Database = getDb()): void 
   db.prepare(`
     INSERT OR REPLACE INTO gallery
       (id, filename, subfolder, mediaType, createdAt, templateName,
-       promptId, sizeBytes, url, type)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       promptId, sizeBytes, url, type,
+       workflowJson, promptText, negativeText, seed, model,
+       sampler, steps, cfg, width, height)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     item.id, item.filename, item.subfolder ?? '', item.mediaType,
     item.createdAt, item.templateName ?? null, item.promptId ?? null,
     item.sizeBytes ?? null, item.url ?? '', item.type ?? 'output',
+    item.workflowJson ?? null, item.promptText ?? null,
+    item.negativeText ?? null, item.seed ?? null, item.model ?? null,
+    item.sampler ?? null, item.steps ?? null, item.cfg ?? null,
+    item.width ?? null, item.height ?? null,
   );
+}
+
+/**
+ * Event-driven append: insert ONLY when the row is absent. Used by the WS
+ * `execution_complete` path so a user-deleted row never resurrects from a
+ * stale ComfyUI history entry — the opposite semantics from `insert()`
+ * which uses OR REPLACE. Returns true when a row was written, false when
+ * the id already existed (already present or previously tombstoned).
+ */
+export function appendFromHistory(
+  item: GalleryRow, db: Database.Database = getDb(),
+): boolean {
+  const info = db.prepare(`
+    INSERT OR IGNORE INTO gallery
+      (id, filename, subfolder, mediaType, createdAt, templateName,
+       promptId, sizeBytes, url, type,
+       workflowJson, promptText, negativeText, seed, model,
+       sampler, steps, cfg, width, height)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    item.id, item.filename, item.subfolder ?? '', item.mediaType,
+    item.createdAt, item.templateName ?? null, item.promptId ?? null,
+    item.sizeBytes ?? null, item.url ?? '', item.type ?? 'output',
+    item.workflowJson ?? null, item.promptText ?? null,
+    item.negativeText ?? null, item.seed ?? null, item.model ?? null,
+    item.sampler ?? null, item.steps ?? null, item.cfg ?? null,
+    item.width ?? null, item.height ?? null,
+  );
+  return info.changes > 0;
 }
 
 export function remove(id: string, db: Database.Database = getDb()): boolean {
@@ -102,38 +161,3 @@ export function listPaginated(
   return { items: rows.map(rowToItem), total };
 }
 
-/**
- * Bulk upsert in a single transaction. Used on first-boot seed (empty DB
- * scan) and on every generation-complete broadcast to keep sqlite in sync
- * with ComfyUI's history without per-row round-trips.
- */
-export function rebuildFromScan(
-  items: GalleryRow[],
-  db: Database.Database = getDb(),
-): number {
-  const stmt = db.prepare(`
-    INSERT OR REPLACE INTO gallery
-      (id, filename, subfolder, mediaType, createdAt, templateName,
-       promptId, sizeBytes, url, type)
-    VALUES (@id, @filename, @subfolder, @mediaType, @createdAt, @templateName,
-            @promptId, @sizeBytes, @url, @type)
-  `);
-  const tx = db.transaction((rows: GalleryRow[]) => {
-    for (const row of rows) {
-      stmt.run({
-        id: row.id,
-        filename: row.filename,
-        subfolder: row.subfolder ?? '',
-        mediaType: row.mediaType,
-        createdAt: row.createdAt,
-        templateName: row.templateName ?? null,
-        promptId: row.promptId ?? null,
-        sizeBytes: row.sizeBytes ?? null,
-        url: row.url ?? '',
-        type: row.type ?? 'output',
-      });
-    }
-  });
-  tx(items);
-  return items.length;
-}
